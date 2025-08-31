@@ -5,6 +5,38 @@ Baseado em **Arduino (Nano/Mega)**, **ESP8266/ESP32** e **nRF24L01 PA/LNA**, o p
 
 ---
 
+## 📸 Visão Geral
+![Controle Frontal](docs/images/controle-frontal.jpg)
+![Controle Interno](docs/images/controle-interno.jpg)
+
+---
+
+## 📖 História do Projeto
+
+A história do **OpenRC AeroLink** começou com um controle antigo de simulador de PC que, devido à montagem precária, acabou guardado por anos.  
+Na faculdade, durante a disciplina de Sistemas Digitais, surgiu a ideia de reconstruí-lo com eletrônica confiável e expandir suas funcionalidades.
+
+O projeto passou por **três grandes etapas**:
+
+1. **Etapa 1 — MEGA + Cabo USB**  
+   O Arduino MEGA foi ligado diretamente aos potenciômetros e switches, atuando como joystick via cabo USB.  
+   - Funcionava muito bem em simuladores, mas era limitado ao uso no PC.  
+   ![Etapa 1](docs/images/etapa1-mega-usb.jpg)
+
+2. **Etapa 2 — NANO + Rádio nRF24L01 (PCB artesanal)**  
+   Foi criada uma primeira versão sem fio usando Arduinos Nano e módulos nRF24L01.  
+   A transmissão de dados funcionava, mas a montagem artesanal com protoboard e PCB improvisada trouxe muitos problemas de confiabilidade.  
+   ![Etapa 2](docs/images/etapa2-nano-rf.jpg)
+
+3. **Etapa 3 — PCB dedicada + ESP + HUD**  
+   Após projetar e mandar fabricar uma PCB própria, o sistema ganhou robustez.  
+   O transmissor (NANO_TX) foi integrado com HUD em duas telas OLED controladas por um ESP8266, e o receptor evoluiu para ESP32, garantindo maior alcance e recursos como PWM/PPM estáveis.  
+   ![Etapa 3](docs/images/etapa3-pcb-esp.jpg)
+
+Hoje, o **OpenRC AeroLink** está consolidado como uma plataforma modular que pode ser usada tanto em simuladores quanto em aeromodelos reais.
+
+---
+
 ## ✨ Recursos
 - 📡 Transmissão sem fio estável (nRF24L01 PA/LNA).  
 - 🎮 Compatível com **vJoy/Simuladores** via Python.  
@@ -12,31 +44,6 @@ Baseado em **Arduino (Nano/Mega)**, **ESP8266/ESP32** e **nRF24L01 PA/LNA**, o p
 - 🖥️ **HUD** com 2 telas OLED (informações de canais, modo, link e calibração).  
 - 🔊 Feedback sonoro (buzzer para modos e falhas).  
 - ⚙️ Arquitetura modular e bem documentada.
-
----
-
-## 📂 Estrutura do Repositório
-firmware/
-├─ NANO_TX/ # Transmissor principal
-├─ NANO_RX/ # RX legado (manutenção)
-├─ ESP8266_TX/ # HUD (OLEDs + buzzer)
-├─ ESP32_RX/ # RX moderno (PWM/PPM)
-├─ MEGA_RX/ # RX compatível + ponte simulador
-└─ MEGA_SIM/ # Sketch para simulador PC
-
-software/
-└─ pc/
-└─ mega_joystick.py # Script Python + vJoy
-
-hardware/
-└─ pcb-nano/ # Layouts da PCB (docs separados)
-
-docs/
-├─ RELATORIO.md
-├─ PCB-RELATORIO.md
-├─ PROTOCOLO.md
-└─ ROADMAP.md
-
 
 ---
 
