@@ -1,33 +1,17 @@
-import serial, sys, time
+import serial, sys
 import pyvjoy
 import keyboard
-from collections import deque
 
-SERIAL_PORT = "COM10"   # confira a porta!
-BAUD = 115200
+# ===== CONFIG =====
+SERIAL_PORT = "COM10"   # <- troque para a COM do NANO_TX (ex.: "COM7")
+BAUD = 115200           # NANO_TX usa 38400
 TIMEOUT_S = 1.0
 
-# ----- TECLAS map -----
-SW1_ON_KEY  = 'g'
-SW1_OFF_KEY = 'g'
-SW2_ON_KEY  = 'f'
-SW2_OFF_KEY = 'f'
-
-# ----- vJoy -----
 VJOY_DEVICE_ID = 1
 BTN_S1 = 9
 BTN_S2 = 10
 
-# ----- FILTRO DE SWITCHES -----
-SW_LOW_THR  = 64
-SW_HIGH_THR = 192
-DEBOUNCE_MS = 1
-STICKY_MS   = 150
-SW_WINDOW_N = 5
-
-# ----- EIXOS (8 pots) -----gf
-DEADZONE_255 = 1
-SMOOTH_N = 0
+# 8 eixos do vJoy (ajuste conforme configurou no vJoy Config)
 AXIS_ORDER = [
     ('wAxisX',    0),
     ('wAxisY',    1),
@@ -39,158 +23,127 @@ AXIS_ORDER = [
     ('wDial',     7),
 ]
 INVERT = [False]*8
+DEADZONE_255 = 1
 
-def to_vjoy(val_255: int, invert=False) -> int:
-    v = 0 if val_255 < 0 else 255 if val_255 > 255 else val_255
+def to_vjoy(v, invert=False):
+    v = 0 if v < 0 else 255 if v > 255 else v
     if abs(v - 127.5) <= DEADZONE_255: v = 128
     if invert: v = 255 - v
     out = int(round((v / 255.0) * 32767.0))
     return 1 if out < 1 else 32767 if out > 32767 else out
 
-def tap_key(key_name: str):
+# crc8 polinômio 0x8C (igual ao Arduino)
+def crc8(data: bytes) -> int:
+    c = 0x00
+    for x in data:
+        b = x
+        for _ in range(8):
+            mix = (c ^ b) & 1
+            c >>= 1
+            if mix:
+                c ^= 0x8C
+            b >>= 1
+    return c & 0xFF
+
+def read_payload_from_tx(port):
+    # Estado simples para achar 0xAA 0x55
+    b = port.read(1)
+    if not b or b[0] != 0xAA:
+        return None
+    b = port.read(1)
+    if len(b) != 1 or b[0] != 0x55:
+        return None
+
+    # Lê length
+    b = port.read(1)
+    if len(b) != 1:
+        return None
+    length = b[0]
+    if length < 1 or length > 32:
+        return None
+
+    # Lê payload + CRC
+    buf = port.read(length + 1)
+    if len(buf) != length + 1:
+        return None
+
+    pay = buf[:-1]
+    crc = buf[-1]
+    if crc8(pay) != crc:
+        return None
+
+    # Esperado: length = 11 (8 ch + sw + rfu0 + rfu1)
+    if length != 11:
+        return None
+
+    ch = list(pay[0:8])
+    sw = pay[8]
+    # pay[9], pay[10] = rfu0, rfu1
+
+    # Bits: sw bit0 = S1, bit1 = S2, bit2 = CAL
+    s1 = 1 if (sw & 0x01) else 0
+    s2 = 1 if (sw & 0x02) else 0
+    cal = 1 if (sw & 0x04) else 0
+    return ch, s1, s2, cal
+
+def tap_key(name):
     try:
-        keyboard.press_and_release(key_name)
-    except Exception as e:
-        print(f"[WARN] Falha ao enviar tecla '{key_name}': {e}", file=sys.stderr)
-
-def median_of(deq):
-    if not deq:
-        return 0
-    s = sorted(deq)
-    n = len(s)
-    return s[n//2] if n % 2 == 1 else (s[n//2 - 1] + s[n//2]) // 2
-
-class SwitchFilter:
-    def __init__(self, low=SW_LOW_THR, high=SW_HIGH_THR, debounce_ms=DEBOUNCE_MS, sticky_ms=STICKY_MS, window_n=SW_WINDOW_N):
-        self.low = low
-        self.high = high
-        self.debounce = debounce_ms / 1000.0
-        self.sticky = sticky_ms / 1000.0
-        self.samples = deque(maxlen=window_n)
-        self.last_stable = 0
-        self.candidate = 0
-        self.cand_since = 0.0
-        self.last_change = 0.0
-
-    def feed(self, raw_val, now):
-        self.samples.append(int(raw_val))
-        med = median_of(self.samples)
-
-        if med <= self.low:
-            cand = 0
-        elif med >= self.high:
-            cand = 1
-        else:
-            cand = self.candidate  # zona morta
-
-        if cand != self.candidate:
-            self.candidate = cand
-            self.cand_since = now
-
-        if (now - self.last_change) < self.sticky:
-            return self.last_stable
-
-        if (now - self.cand_since) >= self.debounce and self.last_stable != self.candidate:
-            self.last_stable = self.candidate
-            self.last_change = now
-
-        return self.last_stable
+        keyboard.press_and_release(name)
+    except Exception:
+        pass
 
 def main():
-    print(f">> Iniciando… vJoy#{VJOY_DEVICE_ID}, Serial {SERIAL_PORT} @ {BAUD}")
-    # vJoy
+    print(f">> vJoy#{VJOY_DEVICE_ID}, Serial {SERIAL_PORT}@{BAUD}")
     try:
         j = pyvjoy.VJoyDevice(VJOY_DEVICE_ID)
         print(">> vJoy OK.")
     except Exception as e:
-        print("[ERRO] Não abriu vJoy. Abra o vJoy Monitor/Config e confira o Device.", e, file=sys.stderr)
+        print("[ERRO] vJoy:", e, file=sys.stderr)
         return
-
-    # Serial
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD, timeout=TIMEOUT_S)
-        print(f">> Serial OK em {SERIAL_PORT}.")
-    except serial.SerialException as e:
-        print("[ERRO] Porta serial:", e, file=sys.stderr)
+        print(">> Serial OK.")
+    except Exception as e:
+        print("[ERRO] Serial:", e, file=sys.stderr)
         return
-    ser.reset_input_buffer()
 
-    smooth = [deque(maxlen=max(1, SMOOTH_N)) for _ in range(8)]
-    sw1 = SwitchFilter()
-    sw2 = SwitchFilter()
     last_s1 = None
     last_s2 = None
-    last_ok = time.time()
-
-    print(">> Rodando. Esperado: p0..p7,s1,s2 (10 campos).")
-    print(f">> s1 -> vJoy Btn {BTN_S1} (hold) + tecla {SW1_ON_KEY}/{SW1_OFF_KEY}")
-    print(f">> s2 -> vJoy Btn {BTN_S2} (hold) + tecla {SW2_ON_KEY}/{SW2_OFF_KEY}")
 
     try:
         while True:
-            line = ser.readline().decode(errors='ignore').strip()
-            now = time.time()
-
-            if not line:
-                if now - last_ok > 1.0:
-                    for name, _ in AXIS_ORDER:
-                        setattr(j.data, name, to_vjoy(128))
-                    j.update()
+            f = read_payload_from_tx(ser)
+            if f is None:
                 continue
 
-            parts = line.split(',')
-            if len(parts) != 10:
-                # print(f"[WARN] Pacote com {len(parts)} campos: {line}")
-                continue
-
-            try:
-                vals = [int(x) for x in parts]
-            except ValueError:
-                # print(f"[WARN] Valor inválido: {line}")
-                continue
-
-            pots = vals[:8]
-            s1_raw, s2_raw = vals[8], vals[9]
+            pots, s1, s2, cal = f
 
             # Eixos
-            for i, (name, src_idx) in enumerate(AXIS_ORDER):
-                v = pots[src_idx]
-                smooth[i].append(v)
-                if SMOOTH_N > 0:
-                    v = sum(smooth[i]) / len(smooth[i])
-                setattr(j.data, name, to_vjoy(int(round(v)), invert=INVERT[i]))
-            j.update()
-            last_ok = now
-
-            # Switches com filtro robusto
-            s1_state = sw1.feed(s1_raw, now)
-            s2_state = sw2.feed(s2_raw, now)
-
-            # vJoy HOLD estável
-            j.set_button(BTN_S1, 1 if s1_state else 0)
-            j.set_button(BTN_S2, 1 if s2_state else 0)
+            for i, (name, src) in enumerate(AXIS_ORDER):
+                setattr(j.data, name, to_vjoy(pots[src], invert=INVERT[i]))
             j.update()
 
-            # Teclas (apenas na borda)
-            if last_s1 is None or s1_state != last_s1:
-                tap_key(SW1_ON_KEY if s1_state else SW1_OFF_KEY)
-                last_s1 = s1_state
-            if last_s2 is None or s2_state != last_s2:
-                tap_key(SW2_ON_KEY if s2_state else SW2_OFF_KEY)
-                last_s2 = s2_state
+            # Botões (HOLD)
+            j.set_button(BTN_S1, 1 if s1 else 0)
+            j.set_button(BTN_S2, 1 if s2 else 0)
+            j.update()
 
-            # print(f"s1_raw={s1_raw} s1={s1_state} | s2_raw={s2_raw} s2={s2_state}")
+            # (Opcional) teclas em borda
+            if last_s1 is None or s1 != last_s1:
+                tap_key('g')   # mesma tecla dos seus testes
+                last_s1 = s1
+            if last_s2 is None or s2 != last_s2:
+                tap_key('f')
+                last_s2 = s2
 
     except KeyboardInterrupt:
         print("\n>> Encerrando…")
-    except serial.SerialException as e:
-        print("[ERRO] Serial durante leitura:", e, file=sys.stderr)
     finally:
-        try:
-            ser.close()
-        except Exception:
-            pass
-        # não “soltamos” os botões aqui de propósito; mantemos último estado
+        try: ser.close()
+        except: pass
 
 if __name__ == "__main__":
+    # Troque COMx antes de rodar
+    if "COMx" in SERIAL_PORT:
+        print(">> Ajuste SERIAL_PORT para a COM do NANO_TX (ex.: COM7).")
     main()
