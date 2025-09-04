@@ -1,296 +1,246 @@
-// ESP8266 HUD duplo lendo NANO_TX por UART (via SoftwareSerial no D3 @ 38400)
-// INT (superior): SCL=D5, SDA=D6, U8G2_R0  -> Mostra título "OpenRC AeroLink" no boot
-// EXT (inferior): SCL=D1, SDA=D2, U8G2_R2  -> Barra de progresso + animação de loading
-// Buzzer ativo 3V3: D0 (GPIO16) - blip curto ao fim do boot e bipes em trocas de modo (CAL<->NORMAL)
-// Animação CAL: ponto girando (overlay leve)
-//
-// >>> ATENÇÃO: Configure o NANO para transmitir a 38400 bps <<<
-// TX do NANO -> (divisor 5V->3V3) -> D3 (GPIO0) do ESP8266
-// GND comum entre NANO e ESP. Evite tráfego durante o boot do ESP (GPIO0 deve ficar alto).
+// ESP8266 HUD – RX do NANO em Serial (GPIO3), 38400 baud
+// OLED externa (HW I2C): SCL=D1(GPIO5), SDA=D2(GPIO4)
+// OLED interna (SW I2C): SCL=D5(GPIO14), SDA=D6(GPIO12)
+// Buzzer via NPN: D0(GPIO16) (HIGH = on)
 
 #include <Arduino.h>
 #include <U8g2lib.h>
-#include <stdint.h>
-#include <SoftwareSerial.h>
+#include <Wire.h>
+#include <EEPROM.h>
 
-#define LOGO_WIDTH  128
-#define LOGO_HEIGHT 64
-#define BUZZER_PIN  D7   // buzzer em D0 (GPIO16)
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2_int(U8G2_R2, D5, D6, U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2_ext(U8G2_R2, /* reset=*/U8X8_PIN_NONE, /* clock=*/D1, /* data=*/D2);
 
-// UART do NANO "escutada" no D3 (GPIO0). Apenas RX (TX=-1), lógica não invertida.
-SoftwareSerial NanoUart(D3, -1, false);
+struct Payload;                                     // <-- importante
+bool readFrame(Stream &S, Payload &out); 
 
-// --- corrige o autoprotótipo do Arduino ---
-struct BuzzPat;                 // forward declaration do tipo
-void startBuzz(const BuzzPat&); // protótipo manual (bloqueia o autoproto)
+#define BUZZER_PIN D0
+struct BuzzPat{ uint16_t onMs, offMs; uint8_t reps; };
+const BuzzPat BZ_CLICK{15,35,1};
+const BuzzPat BZ_LONG {55,45,1};
+uint8_t  bzLeft=0; uint32_t bzT0=0; uint16_t bzOn=0,bzOff=0; bool bzOnState=false;
+void buzz(const BuzzPat&p){ bzOn=p.onMs; bzOff=p.offMs; bzLeft=p.reps*2; bzOnState=true; bzT0=millis(); digitalWrite(BUZZER_PIN,HIGH); }
+void buzzerTask(){ if(!bzLeft) return; uint32_t dt=millis()-bzT0; if(bzOnState && dt>=bzOn){ digitalWrite(BUZZER_PIN,LOW); bzOnState=false; bzT0=millis(); bzLeft--; } else if(!bzOnState && dt>=bzOff){ if(bzLeft>1){ digitalWrite(BUZZER_PIN,HIGH); bzOnState=true; bzT0=millis(); bzLeft--; } else { bzLeft=0; } } }
 
-// -------- Displays --------
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C oledInt(
-  U8G2_R2, /*clock=*/D5, /*data=*/D6, /*reset=*/U8X8_PIN_NONE
-);
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C oledExt(
-  U8G2_R2, /*clock=*/D1, /*data=*/D2, /*reset=*/U8X8_PIN_NONE
-);
-
-// -------- Payload UART --------
+// ---------- Protocolo UART ----------
 struct __attribute__((packed)) Payload {
-  uint8_t ch[8];       // 0..255
-  uint8_t sw;          // bit0=S1, bit1=S2, bit2=CAL
-  uint8_t rfu0, rfu1;  // 0
+  uint8_t ch[8];     // ch[7] = delta em detentes (int8 + 128)
+  uint8_t sw;        // 0=S1, 1=S2, 2=CAL
+  uint8_t seqShort;  // contador de cliques curtos
+  uint8_t seqLong;   // contador de cliques longos
 };
 
-static uint8_t crc8(const uint8_t* d, size_t n){
-  uint8_t c=0x00;
-  for(size_t i=0;i<n;i++){
-    uint8_t x=d[i];
-    for(uint8_t b=0;b<8;b++){ uint8_t mix=(c^x)&1; c>>=1; if(mix) c^=0x8C; x>>=1; }
-  }
-  return c;
-}
+static uint8_t crc8(const uint8_t* d, size_t n){ uint8_t c=0x00; for(size_t i=0;i<n;i++){ uint8_t x=d[i]; for(uint8_t b=0;b<8;b++){ uint8_t mix=(c^x)&1; c>>=1; if(mix) c^=0x8C; x>>=1; } } return c; }
 
 bool readFrame(Stream &S, Payload &out){
-  enum {S1,S2,SL,SP,SC};
-  static uint8_t st=S1, len=0, buf[32], idx=0;
+  enum {S1,S2,SL,SP,SC}; static uint8_t st=S1,len=0,buf[32],idx=0;
   while (S.available()){
-    uint8_t b = S.read();
+    uint8_t b=S.read();
     switch(st){
       case S1: st=(b==0xAA)?S2:S1; break;
       case S2: st=(b==0x55)?SL:S1; break;
       case SL: len=b; if(len>sizeof(buf)){ st=S1; break; } idx=0; st=SP; break;
       case SP: buf[idx++]=b; if(idx>=len) st=SC; break;
-      case SC:{
-        uint8_t c=crc8(buf,len);
-        bool ok=(c==b && len==sizeof(Payload));
-        st=S1;
-        if (ok){ memcpy(&out,buf,sizeof(Payload)); return true; }
-        return false;
-      }
+      case SC:{ bool ok=(crc8(buf,len)==b && len==sizeof(Payload)); st=S1; if(ok){ memcpy(&out,buf,sizeof(Payload)); return true; } return false; }
     }
   }
   return false;
 }
 
-// -------- Helpers de desenho --------
-static inline uint8_t barW(uint8_t v, uint8_t w){ return (uint16_t(v)*(w-2)+127)/255; }
+// ---------- UI ----------
+enum Layer : uint8_t { LAYER_EXT=0, LAYER_INT=1 };
+enum UiMode : uint8_t { UI_HOME=0, UI_MENU=1 };
+Layer  focusLayer = LAYER_EXT;
+UiMode uiMode     = UI_HOME;
 
-// -------- Buzzer (não-bloqueante) --------
-enum BuzzState { BZ_IDLE, BZ_ON, BZ_OFF };
+const char* EXT_CARDS[] = { "Altimetria","Bateria RX","RSSI/LQ","Velocidade","Distancia" };
+const char* INT_CARDS[] = { "Bat TX:Nano","Bat TX:ESP","Status Link","Modo/Piloto","Diag" };
+const uint8_t EXT_CARD_COUNT = sizeof(EXT_CARDS)/sizeof(EXT_CARDS[0]);
+const uint8_t INT_CARD_COUNT = sizeof(INT_CARDS)/sizeof(INT_CARDS[0]);
+uint8_t extCard=0, intCard=0;
 
-struct BuzzPat {
-  uint16_t onMs;
-  uint16_t offMs;
-  uint8_t  reps;
-};
+enum MenuId : uint8_t { M_MAIN=0, M_OPTIONS, M_RADIO };
+uint8_t currentMenu = M_MAIN;
+int8_t  cursor = 0;
 
-// (variáveis do buzzer)
-BuzzState bzState = BZ_IDLE;
-uint32_t  bzT0 = 0;
-uint8_t   bzLeft = 0;
-uint16_t  bzOnMs=0, bzOffMs=0;
+struct Cfg { uint8_t ctrlMode,pilotMode,theme,telemOn,smooth; uint8_t rf_ch,rf_rate,rf_pa,rf_crc,rf_aa,rf_retries; } cfg;
+const uint16_t EEPROM_MAGIC = 0xA1C3;
+struct Persist { uint16_t magic; Cfg cfg; } persist;
+void loadCfg(){ EEPROM.begin(512); EEPROM.get(0, persist); if (persist.magic!=EEPROM_MAGIC){ cfg={0,0,1,1,2, 76,1,2,1,1,10}; persist.magic=EEPROM_MAGIC; persist.cfg=cfg; EEPROM.put(0,persist); EEPROM.commit(); } else cfg=persist.cfg; }
+void saveCfg(){ persist.magic=EEPROM_MAGIC; persist.cfg=cfg; EEPROM.put(0,persist); EEPROM.commit(); }
 
-void startBuzz(const BuzzPat &p){
-  bzOnMs = p.onMs;
-  bzOffMs = p.offMs;
-  bzLeft = p.reps * 2;   // ON+OFF = 2 steps
-  bzState = BZ_ON;
-  bzT0 = millis();
-  digitalWrite(BUZZER_PIN, HIGH);
-}
+const char* CTRL_MODES[] = { "Veiculo 1","Veiculo 2","Veiculo 3" };
+const char* PILOT_MODES[] = { "Responsivo","Alcance","Iniciante","Personal" };
+const char* RATES[] = { "250K","1M","2M" };
+const char* PAs[]   = { "MIN","LOW","HIGH","MAX" };
+const char* CRCs[]  = { "8b","16b" };
 
-void buzzerTask(){
-  if (bzState==BZ_IDLE || bzLeft==0) return;
-  uint32_t dt = millis() - bzT0;
-  if (bzState==BZ_ON && dt >= bzOnMs){
-    digitalWrite(BUZZER_PIN, LOW);
-    bzState = BZ_OFF; bzT0 = millis(); bzLeft--;
-  } else if (bzState==BZ_OFF && dt >= bzOffMs){
-    if (bzLeft>1){
-      digitalWrite(BUZZER_PIN, HIGH);
-      bzState = BZ_ON;  bzT0 = millis(); bzLeft--;
-    } else {
-      bzState = BZ_IDLE; bzLeft = 0; digitalWrite(BUZZER_PIN, LOW);
-    }
-  }
-}
-
-const BuzzPat BZ_EXIT  = {120, 120, 2};  // bi-bi (sair de CAL)
-const BuzzPat BZ_ENTER = {350, 120, 1};  // biiii (entrar em CAL)
-const BuzzPat BZ_BOOT  = {10,  40,  1};  // blip curto ao fim do boot
-
-// -------- Animação CAL / Loading (ponto girando) --------
-const int8_t CIRC_X[16] = { 0, 3, 6, 8,  9,  8,  6, 3,  0, -3, -6, -8, -9, -8, -6, -3 };
-const int8_t CIRC_Y[16] = {-9,-8,-6,-3,  0,  3,  6, 8,  9,  8,  6,  3,  0, -3, -6, -8 };
-
-void drawSpin(U8G2 &d, int cx, int cy, uint16_t msPerStep=60){
-  static uint8_t step=0;
-  step = (millis()/msPerStep) & 0x0F; // ~16 fps
-  d.drawCircle(cx, cy, 11, U8G2_DRAW_ALL);
-  d.drawDisc  (cx + CIRC_X[step], cy + CIRC_Y[step], 2, U8G2_DRAW_ALL);
-}
-
-// -------- Telas --------
-void drawIntegrated(U8G2 &d, const Payload& p, bool linkOk, bool cal){
-  d.clearBuffer();
-  d.setFont(u8g2_font_6x10_tf);
-  d.drawStr(0,10,"INT C1..C4 + dot C5..C8");
-  d.drawStr(94,10, linkOk ? "LINK" : "----");
-
-  const int w = 60, h = 10, dx = 64, dy = 22;
-  for(int i=0;i<4;i++){
-    int col = i/2, row = i%2;
-    int x = 4 + col*dx;
-    int y = 16 + row*dy;
-    d.drawFrame(x,y,w,h);
-    uint8_t bw = barW(p.ch[i], w);
-    d.drawBox(x+1, y+1, bw, h-2);
-
-    uint8_t bx = x+1 + barW(p.ch[4+i], w);
-    int cy = y + h/2;
-    d.drawDisc(bx, cy, 2, U8G2_DRAW_ALL);
-
-    d.setCursor(x, y+h+10);
-    d.print('C'); d.print(i+1); d.print('/'); d.print(i+5);
-    d.print(" v="); d.print((int)p.ch[i]);
-  }
-
-  if (cal){
-    d.setCursor(98, 24); d.print("CAL");
-    drawSpin(d, 64, 32);
-  }
-  d.sendBuffer();
-}
-
-void drawExternal(U8G2 &d, const Payload& p, bool linkOk, bool cal){
-  d.clearBuffer();
-  d.setFont(u8g2_font_6x10_tf);
-  d.drawStr(94,10, linkOk ? "LINK" : "----");
-
-  const int w = 60, h = 10, dx = 64, dy = 22;
-  for(int i=0;i<4;i++){
-    int col = i/2, row = i%2;
-    int x = 4 + col*dx;
-    int y = 16 + row*dy;
-    d.drawFrame(x,y,w,h);
-    uint8_t bw = barW(p.ch[i], w);
-    d.drawBox(x+1, y+1, bw, h-2);
-
-    uint8_t bx = x+1 + barW(p.ch[4+i], w);
-    int cy = y + h/2;
-    d.drawDisc(bx, cy, 2, U8G2_DRAW_ALL);
-  }
-
-  // S1/S2/CAL destaque
-  d.setFont(u8g2_font_7x14B_tf);
-  d.drawStr(4, 62,  (p.sw&1)?"ON ":"OFF");
-  d.drawStr(68,62,  (p.sw&2)?"ON ":"OFF");
-
-  if (cal) drawSpin(d, 64, 32);
-  d.sendBuffer();
-}
-
-// -------- Estado --------
 Payload cur{}, prev{};
-uint32_t tLastRx=0;
-bool calPrev=false;
+uint8_t prevSeqShort=0, prevSeqLong=0;
+uint32_t tLastRx=0; bool linkOk=false;
+uint32_t lastLongHandledMs=0; const uint16_t LONG_COOLDOWN_MS=500; // extra proteção
 
-static bool payloadChanged(const Payload& a, const Payload& b){
-  if (a.sw != b.sw) return true;
-  for (int i=0;i<8;i++) if (a.ch[i]!=b.ch[i]) return true;
-  return false;
-}
-
-// -------- Boot Splash (sem bitmap): título em cima, barra+animação embaixo --------
-void bootSplash(uint16_t total_ms = 5000) {
-  uint32_t t0 = millis();
-  uint8_t dotCount = 0;
-
-  while (true) {
-    uint32_t elapsed = millis() - t0;
-    if (elapsed > total_ms) elapsed = total_ms;
-
-    // calcula progresso da barra
-    const int BAR_X = 8, BAR_W = 112, BAR_H = 8, BAR_Y = 64 - 10;
-    uint16_t fill = (uint32_t)elapsed * (BAR_W - 2) / total_ms;
-
-     // --- Tela de cima (nome do projeto) ---
-    oledExt.clearBuffer();
-    oledExt.setFont(u8g2_font_ncenB14_tr);
-    oledExt.drawStr(20, 32, "OpenRC");
-    oledExt.drawStr(18, 52, "AeroLink");
-    oledExt.sendBuffer();
-
-    // --- Tela de baixo (barra + pontos pulando) ---
-    oledInt.clearBuffer();
-    oledInt.setFont(u8g2_font_6x10_tf);
-    oledInt.drawFrame(BAR_X, BAR_Y, BAR_W, BAR_H);
-    oledInt.drawBox(BAR_X + 1, BAR_Y + 1, fill, BAR_H - 2);
-
-    // animação de pontos (muda a cada ~300ms)
-    dotCount = (elapsed / 300) % 4; // 0,1,2,3
-    String dots = "";
-    for (uint8_t i = 0; i < dotCount; i++) dots += ".";
-    oledInt.setCursor(30, 40);
-    oledInt.print("Loading");
-    oledInt.print(dots);
-    oledInt.sendBuffer();
-
-    if (elapsed >= total_ms) break;
-    delay(50);
-    yield();
+// ---- Navegação/menus ----
+void menuReset(){ currentMenu=M_MAIN; cursor=0; }
+void menuScroll(int8_t dir){ int8_t maxIdx= (currentMenu==M_MAIN?5:(currentMenu==M_OPTIONS?5:6)); cursor+=dir; if(cursor<0) cursor=maxIdx; if(cursor>maxIdx) cursor=0; }
+void menuChangeValue(int8_t step){
+  if (currentMenu==M_MAIN){
+    if      (cursor==1){ cfg.ctrlMode  = (cfg.ctrlMode + step + 3)%3; saveCfg(); }
+    else if (cursor==2){ cfg.pilotMode = (cfg.pilotMode+ step + 4)%4; saveCfg(); }
+    else if (cursor==3){ cfg.theme     = (cfg.theme    + step + 2)%2; saveCfg(); }
+  } else if (currentMenu==M_OPTIONS){
+    if      (cursor==1){ cfg.telemOn ^=1; saveCfg(); }
+    else if (cursor==2){ int v=cfg.smooth + step; if(v<0)v=5; if(v>5)v=0; cfg.smooth=v; saveCfg(); }
+    else if (cursor==5){ Cfg keep=cfg; keep.ctrlMode=0; keep.pilotMode=0; keep.telemOn=1; keep.smooth=2; keep.rf_ch=76; keep.rf_rate=1; keep.rf_pa=2; keep.rf_crc=1; keep.rf_aa=1; keep.rf_retries=10; keep.theme=cfg.theme; cfg=keep; saveCfg(); }
+  } else if (currentMenu==M_RADIO){
+    if      (cursor==1){ int ch=cfg.rf_ch+step; if(ch<0)ch=125; if(ch>125)ch=0; cfg.rf_ch=ch; saveCfg(); }
+    else if (cursor==2){ cfg.rf_rate=(cfg.rf_rate+step+3)%3; saveCfg(); }
+    else if (cursor==3){ cfg.rf_pa  =(cfg.rf_pa  +step+4)%4; saveCfg(); }
+    else if (cursor==4){ cfg.rf_crc^=1; saveCfg(); }
+    else if (cursor==5){ cfg.rf_aa ^=1; saveCfg(); }
+    else if (cursor==6){ int rr=cfg.rf_retries+step; if(rr<0)rr=15; if(rr>15)rr=0; cfg.rf_retries=rr; saveCfg(); }
   }
-
-  // ao terminar → beep curto
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(50); // blip bem curto
-  digitalWrite(BUZZER_PIN, LOW);
+}
+void menuEnter(){
+  if (currentMenu==M_MAIN){
+    if      (cursor==0) uiMode=UI_HOME;
+    else if (cursor==4) { currentMenu=M_OPTIONS; cursor=0; }
+    else if (cursor==5) { currentMenu=M_RADIO;   cursor=0; }
+  } else if (cursor==0){
+    currentMenu=M_MAIN; cursor=0;
+  }
 }
 
+void onShortClick(){ if (uiMode==UI_HOME){ focusLayer=(focusLayer==LAYER_EXT)?LAYER_INT:LAYER_EXT; } else { menuEnter(); } }
+void onLongPress(){ if (uiMode==UI_HOME){ uiMode=UI_MENU; menuReset(); } else { uiMode=UI_HOME; } }
+
+// ---- Render HUD ----
+void drawFocusBadge(U8G2& u8,bool f){ if(f) u8.drawBox(122,0,6,6); else u8.drawFrame(122,0,6,6); }
+void drawCard(U8G2& u8,const char* title,const char* v1=nullptr,const char* v2=nullptr){ u8.clearBuffer(); u8.setFont(u8g2_font_6x13B_tf); u8.drawStr(2,12,title); u8.drawHLine(0,14,128); u8.setFont(u8g2_font_6x10_tf); if(v1)u8.drawStr(2,32,v1); if(v2)u8.drawStr(2,48,v2); u8.sendBuffer(); }
+
+void renderHome(){
+  const char* intTitle = INT_CARDS[intCard];
+  const char* extTitle = EXT_CARDS[extCard];
+
+  // EXTERNA
+  u8g2_ext.clearBuffer(); drawFocusBadge(u8g2_ext, focusLayer==LAYER_EXT);
+  if      (strcmp(extTitle,"Altimetria")==0)  drawCard(u8g2_ext,"Altimetria","Aguardando...","---");
+  else if (strcmp(extTitle,"Bateria RX")==0)  drawCard(u8g2_ext,"Bateria RX","V: N/A","%: N/A");
+  else if (strcmp(extTitle,"RSSI/LQ")==0)     drawCard(u8g2_ext,"RSSI/LQ","RSSI: N/A","LQ: N/A");
+  else if (strcmp(extTitle,"Velocidade")==0)  drawCard(u8g2_ext,"Velocidade","N/A",nullptr);
+  else if (strcmp(extTitle,"Distancia")==0)   drawCard(u8g2_ext,"Distancia","N/A",nullptr);
+  u8g2_ext.sendBuffer();
+
+  // INTERNA
+  u8g2_int.clearBuffer(); drawFocusBadge(u8g2_int, focusLayer==LAYER_INT);
+  if      (strcmp(intTitle,"Bat TX:Nano")==0) drawCard(u8g2_int,"Bat TX:Nano","V: N/A","%: N/A");
+  else if (strcmp(intTitle,"Bat TX:ESP")==0)  drawCard(u8g2_int,"Bat TX:ESP","V: N/A","%: N/A");
+  else if (strcmp(intTitle,"Status Link")==0) drawCard(u8g2_int,"Status Link", linkOk? "OK":"Sem sinal", nullptr);
+  else if (strcmp(intTitle,"Modo/Piloto")==0){ char l1[24]; snprintf(l1,sizeof(l1),"Ctrl: %u",(unsigned)(cfg.ctrlMode+1)); const char* pm=PILOT_MODES[cfg.pilotMode%4]; char l2[24]; snprintf(l2,sizeof(l2),"Pilot: %s",pm); drawCard(u8g2_int,"Modo/Piloto",l1,l2); }
+  else if (strcmp(intTitle,"Diag")==0){ char l1[24]; snprintf(l1,sizeof(l1),"CH:%u RATE:%s",cfg.rf_ch,RATES[cfg.rf_rate]); char l2[24]; snprintf(l2,sizeof(l2),"PA:%s CRC:%s",PAs[cfg.rf_pa],CRCs[cfg.rf_crc]); drawCard(u8g2_int,"Diag",l1,l2); }
+  u8g2_int.sendBuffer();
+}
+
+// ---- Render MENU **full-screen** ----
+void drawMenuList(U8G2& u8,const char* title,const char* const* items,uint8_t count){
+  u8.clearBuffer();
+  u8.setFont(u8g2_font_6x13B_tf); u8.drawStr(2,12,title); u8.drawHLine(0,14,128); u8.setFont(u8g2_font_6x10_tf);
+  const uint8_t rowH=12;
+  for(uint8_t i=0;i<count;i++){ int y=28 + i*rowH; if(i==cursor) u8.drawStr(2,y,">"); u8.drawStr(12,y,items[i]); }
+  u8.sendBuffer();
+}
+
+void renderMenu(){
+  // EXTERNA: cabeçalho claro de que estamos no menu
+  u8g2_ext.clearBuffer();
+  u8g2_ext.setFont(u8g2_font_7x14B_tf);
+  u8g2_ext.drawStr(10, 20, "MENU ATIVO");
+  u8g2_ext.setFont(u8g2_font_6x10_tf);
+  u8g2_ext.drawStr(10, 38, "Gire p/ navegar");
+  u8g2_ext.drawStr(10, 52, "Clique curto = Enter");
+  u8g2_ext.sendBuffer();
+
+  // INTERNA: a lista do menu
+  switch(currentMenu){
+    case M_MAIN: {
+      const char* items[]={"<- Voltar","Modos do controle","Modo de pilotagem","Tema (Claro/Escuro)","Opcoes","Radio (NRF24)"};
+      drawMenuList(u8g2_int,"MENU",items,6);
+    } break;
+    case M_OPTIONS: {
+      const char* items[]={"<- Voltar","Telemetria (On/Off)","Smooth (0..5)","Calibracao (stub)","Salvar cfg (auto)","Resetar cfg"};
+      drawMenuList(u8g2_int,"OPCOES",items,6);
+    } break;
+    case M_RADIO: {
+      char chLine[20];  snprintf(chLine,sizeof(chLine),"Canal RF: %u",cfg.rf_ch);
+      char rateLine[20];snprintf(rateLine,sizeof(rateLine),"DataRate: %s",RATES[cfg.rf_rate]);
+      char paLine[20];  snprintf(paLine,sizeof(paLine),"PA: %s",PAs[cfg.rf_pa]);
+      char crcLine[20]; snprintf(crcLine,sizeof(crcLine),"CRC: %s",CRCs[cfg.rf_crc]);
+      char aaLine[20];  snprintf(aaLine,sizeof(aaLine),"AutoAck: %s",cfg.rf_aa?"On":"Off");
+      char rtLine[20];  snprintf(rtLine,sizeof(rtLine),"Retries: %u",cfg.rf_retries);
+      const char* items[]={ "<- Voltar", chLine, rateLine, paLine, crcLine, aaLine, rtLine };
+      drawMenuList(u8g2_int,"RADIO",items,7);
+    } break;
+  }
+}
+
+// ---- Aplicar delta do encoder ----
+void applyDeltaSteps(int16_t steps){
+  if (steps==0) return;
+  int8_t dir = (steps>0)? +1 : -1;
+  for (int16_t k=0;k<abs(steps);k++){
+    if (uiMode==UI_HOME){
+      if (focusLayer==LAYER_EXT) extCard=(extCard+(dir>0?1:-1)+EXT_CARD_COUNT)%EXT_CARD_COUNT;
+      else                       intCard=(intCard+(dir>0?1:-1)+INT_CARD_COUNT)%INT_CARD_COUNT;
+    } else {
+      menuScroll(dir>0?1:-1);
+      menuChangeValue(dir>0?+1:-1);
+    }
+  }
+}
 
 void setup(){
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
+  pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW);
+  Serial.begin(38400);
 
-  // Logs na USB
-  Serial.begin(115200);
+  u8g2_int.begin(); u8g2_ext.begin();
+  loadCfg();
 
-  // UART do NANO via SoftwareSerial no D3 (GPIO0). NANO deve transmitir a 38400.
-  NanoUart.begin(38400);
-
-  oledInt.begin();
-  oledExt.begin();
-
-  // Splash de boot customizado
-  bootSplash(5000);
-  delay(100);
+  // Splash
+  u8g2_ext.clearBuffer(); u8g2_ext.setFont(u8g2_font_6x13B_tf); u8g2_ext.drawStr(6,28,"OpenRC AeroLink"); u8g2_ext.drawStr(6,44,"HUD ESP8266"); u8g2_ext.sendBuffer();
+  u8g2_int.clearBuffer(); u8g2_int.setFont(u8g2_font_6x10_tf); u8g2_int.drawStr(8,32,"Aguardando link..."); u8g2_int.sendBuffer();
 }
 
 void loop(){
-  bool got = readFrame(NanoUart, cur);
-  if (got) tLastRx = millis();
-
-  if (got) {
-    Serial.print("[RX] ch0="); Serial.print(cur.ch[0]);
-    Serial.print(" sw="); Serial.println(cur.sw, BIN);
-  }
-
-  // Buzzer em trocas de modo CAL
-  bool calNow = (cur.sw & 0x04);
-  if (calNow != calPrev){
-    if (calNow) startBuzz(BZ_ENTER); else startBuzz(BZ_EXIT);
-    calPrev = calNow;
-  }
   buzzerTask();
 
-  // Nano transmite ~a cada 25 ms; 300 ms é margem segura para "link ok"
-  bool linkOk = (millis() - tLastRx) < 300;
+  // RX
+  Payload rx; bool got = readFrame(Serial, rx);
+  if (got){ cur=rx; tLastRx=millis(); }
+  linkOk = (millis()-tLastRx) < 300;
 
+  // Eventos por contadores
+  uint8_t dShort = cur.seqShort - prevSeqShort;
+  uint8_t dLong  = cur.seqLong  - prevSeqLong;
+
+  if (dShort){ for(uint8_t i=0;i<dShort;i++){ onShortClick(); buzz(BZ_CLICK);} prevSeqShort = cur.seqShort; }
+  if (dLong){
+    for(uint8_t i=0;i<dLong;i++){
+      uint32_t now=millis();
+      if (now - lastLongHandledMs >= LONG_COOLDOWN_MS){
+        onLongPress(); buzz(BZ_LONG); lastLongHandledMs = now;
+      }
+    }
+    prevSeqLong = cur.seqLong;
+  }
+
+  // Giro (detentes)
+  int8_t det = (int8_t)cur.ch[7] - 128;
+  if (det) applyDeltaSteps(det);
+
+  // Render ~30 FPS
   static uint32_t tDraw=0;
-  bool needDraw = got || payloadChanged(cur, prev) || (millis()-tDraw)>=33; // ~30 FPS
-
-  if (needDraw){
-    tDraw = millis();
-    drawIntegrated(oledInt, cur, linkOk, calNow);
-    drawExternal  (oledExt, cur, linkOk, calNow);
-    prev = cur;
+  if (millis()-tDraw >= 33){
+    tDraw=millis();
+    if (uiMode==UI_HOME) renderHome(); else renderMenu();
   }
 }
