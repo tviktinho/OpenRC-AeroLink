@@ -12,8 +12,8 @@ TIMEOUT_S = 1.0
 SW1_ON_KEY  = 'g'
 SW1_OFF_KEY = 'g'
 # s2: 0->OFF, 255->ON
-SW2_ON_KEY  = 'f'
-SW2_OFF_KEY = 'f'
+SW2_ON_KEY  = 'r'
+SW2_OFF_KEY = 'r'
 
 # --- BOTÕES vJoy para os switches ---
 VJOY_DEVICE_ID = 1
