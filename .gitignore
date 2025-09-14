@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# PyInstaller artifacts
+build/
+dist/
+*.spec
+software/pc/build/
+software/pc/dist/
+
+# Local virtual envs
+.venv/
+venv/
+env/
+software/pc/.venv_build/
+.tmp_psg/
+.tmp_psg2/
+.tmp_psg*/
+
+# IDE
+.vscode/
+.idea/

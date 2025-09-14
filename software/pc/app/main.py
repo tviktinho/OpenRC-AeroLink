@@ -6,6 +6,34 @@ import time
 from typing import Dict, Any
 
 import PySimpleGUI as sg
+# Compatibility: some packaged environments expose elements only under
+# PySimpleGUI.PySimpleGUI. If attributes like Text/theme aren't present
+# on the top-level package, fall back to the submodule.
+try:  # pragma: no cover
+    _ = sg.Text  # type: ignore[attr-defined]
+except Exception:  # noqa: BLE001
+    try:
+        import PySimpleGUI.PySimpleGUI as _psg  # type: ignore
+
+        sg = _psg  # type: ignore
+    except Exception:
+        pass
+
+try:
+    import ctypes  # For Windows message box fallback when GUI base missing
+except Exception:  # pragma: no cover
+    ctypes = None  # type: ignore
+
+def _fatal_popup(msg: str) -> None:
+    try:
+        if sys.platform.startswith("win") and ctypes is not None:
+            MB_ICONERROR = 0x10
+            ctypes.windll.user32.MessageBoxW(0, msg, APP_NAME, MB_ICONERROR)  # type: ignore[attr-defined]
+        else:
+            print(msg, file=sys.stderr)
+    except Exception:
+        pass
+    sys.exit(1)
 
 from bridge_core import BridgeWorker, list_serial_ports
 
@@ -52,7 +80,28 @@ def save_config(cfg: Dict[str, Any]) -> None:
 
 
 def run_gui() -> None:
-    sg.theme("SystemDefault")
+    # Use modern theme API if available; fall back for old PySimpleGUI
+    try:
+        if hasattr(sg, "theme"):
+            sg.theme("SystemDefault")
+        else:
+            # Older PySimpleGUI used ChangeLookAndFeel
+            sg.ChangeLookAndFeel("SystemDefault")  # type: ignore[attr-defined]
+    except Exception:
+        # If theming isn't available, continue with defaults
+        pass
+
+    # Validate required GUI elements exist (tkinter collected correctly)
+    required_attrs = ("Text", "Button", "Window")
+    if not all(hasattr(sg, a) for a in required_attrs):
+        loc = getattr(sg, "__file__", "<unknown>")
+        ver = getattr(sg, "version", "<unknown>")
+        _fatal_popup(
+            "PySimpleGUI incompleto no executável.\n"
+            f"Arquivo: {loc}\nVersão: {ver}\n\n"
+            "Reinstale dependências e gere novamente o .exe.\n"
+            "Dica: use PySimpleGUI==4.60.5 e inclua tkinter no build."
+        )
 
     cfg = load_config()
 
