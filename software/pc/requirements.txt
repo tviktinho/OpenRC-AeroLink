@@ -1,5 +1,5 @@
 pyserial>=3.5
-PySimpleGUI
+FreeSimpleGUI>=5.1.0
 pyvjoy>=1.0.1
 keyboard>=0.13.5
 pyinstaller>=6.2

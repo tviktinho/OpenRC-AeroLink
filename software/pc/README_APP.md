@@ -3,6 +3,7 @@ OpenRC-AeroLink Bridge (PC App)
 Resumo
 - App Windows (EXE único) que lê dados da serial do MEGA, envia eixos para o vJoy e dispara teclas nas bordas dos switches.
 - GUI simples: selecionar porta COM e definir teclas dos dois switches (ex.: G e R).
+- Usa FreeSimpleGUI (fork gratuito do PySimpleGUI) para a interface.
 
 Pré‑requisitos
 - vJoy instalado e dispositivo configurado (ID 1 por padrão).

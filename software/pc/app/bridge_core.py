@@ -143,6 +143,8 @@ class BridgeWorker:
 
         smooth = [deque(maxlen=max(1, self.smooth_n)) for _ in range(8)]
         last_ok = time.time()
+        last_warn = 0.0
+        dbg_bad_lines = 0
         last_s1_on: Optional[int] = None
         last_s2_on: Optional[int] = None
 
@@ -158,6 +160,10 @@ class BridgeWorker:
                         j.set_button(1, 0)
                         j.set_button(2, 0)
                         j.update()
+                        # Log a gentle warning at most every 2s
+                        if now - last_warn > 2.0:
+                            self.log("[WARN] Sem dados do MEGA (timeout). Verifique conexões e porta COM.")
+                            last_warn = now
                     continue
 
                 try:
@@ -167,6 +173,9 @@ class BridgeWorker:
 
                 parts = line.split(",")
                 if len(parts) != 10:
+                    if dbg_bad_lines < 3 and line:
+                        self.log(f"[INFO] Linha ignorada: '{line}'")
+                        dbg_bad_lines += 1
                     continue
 
                 try:
@@ -228,4 +237,3 @@ class BridgeWorker:
                 pass
             self._running.clear()
             self.log("Conexão finalizada.")
-
