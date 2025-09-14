@@ -5,8 +5,13 @@ import threading
 import time
 from typing import Dict, Any
 
-import PySimpleGUI as sg
-# Compatibility: some packaged environments expose elements only under
+# Prefer the free community fork first, then fall back to PySimpleGUI
+try:
+    import FreeSimpleGUI as sg  # type: ignore
+except Exception:
+    import PySimpleGUI as sg  # type: ignore
+
+# Compatibility: in some packaged environments elements live under
 # PySimpleGUI.PySimpleGUI. If attributes like Text/theme aren't present
 # on the top-level package, fall back to the submodule.
 try:  # pragma: no cover
@@ -14,7 +19,6 @@ try:  # pragma: no cover
 except Exception:  # noqa: BLE001
     try:
         import PySimpleGUI.PySimpleGUI as _psg  # type: ignore
-
         sg = _psg  # type: ignore
     except Exception:
         pass
@@ -97,10 +101,10 @@ def run_gui() -> None:
         loc = getattr(sg, "__file__", "<unknown>")
         ver = getattr(sg, "version", "<unknown>")
         _fatal_popup(
-            "PySimpleGUI incompleto no executável.\n"
+            "Biblioteca de GUI incompleta no executável.\n"
             f"Arquivo: {loc}\nVersão: {ver}\n\n"
-            "Reinstale dependências e gere novamente o .exe.\n"
-            "Dica: use PySimpleGUI==4.60.5 e inclua tkinter no build."
+            "Reinstale as dependências e gere o .exe novamente.\n"
+            "Dica: prefira FreeSimpleGUI (gratuito) ou inclua tkinter no build."
         )
 
     cfg = load_config()
