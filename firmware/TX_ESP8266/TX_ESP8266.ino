@@ -9,14 +9,16 @@
 #include <Wire.h>
 #include <EEPROM.h>
 
-// -------- Displays --------
+#define ENC_CLK D7   // GPIO13
+#define ENC_DT  D4   // GPIO2 (strap de boot alto)
+#define ENC_GATE_US 250UL          // 200–600 us
+#define ENC_EDGES_PER_STEP 2       // 2 = 1 passo por “clique” típico (KY-040)
+#define BUZZER_PIN D0
+
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2_int(U8G2_R2, D5, D6, U8X8_PIN_NONE);
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2_ext(U8G2_R2, /* reset=*/U8X8_PIN_NONE, /* clock=*/D1, /* data=*/D2);
 
 struct Payload;
-
-// -------- Buzzer --------
-#define BUZZER_PIN D0
 struct BuzzPat{ uint16_t onMs, offMs; uint8_t reps; };
 const BuzzPat BZ_CLICK{15,35,1};
 const BuzzPat BZ_LONG {55,45,1};
@@ -56,11 +58,6 @@ bool readFrame(Stream &S, Payload &out){
   return false;
 }
 
-// -------- Encoder local no ESP: CLK=D7, DT=D4 --------
-#define ENC_CLK D7   // GPIO13
-#define ENC_DT  D4   // GPIO2 (strap de boot alto)
-#define ENC_GATE_US 250UL          // 200–600 us
-#define ENC_EDGES_PER_STEP 2       // 2 = 1 passo por “clique” típico (KY-040)
 
 volatile int16_t encEdges = 0;     // soma de transições (+/-)
 volatile uint8_t q_prev   = 0;
@@ -157,7 +154,7 @@ void menuReset(){ currentMenu=M_MAIN; cursor=0; }
 uint8_t menuItemCount(uint8_t m){ return (m==M_MAIN)?6: (m==M_OPTIONS?6:7); }
 void menuItemText(uint8_t m, uint8_t idx, char* out, size_t n){
   if (m==M_MAIN){
-    const char* items[] = {"<- Voltar","Modos do controle","Modo de pilotagem","Tema (Claro/Escuro)","Opcoes","Radio (NRF24)"};
+    const char* items[] = {"<- Voltar","Modos do controle","Modo de pilotagem","Tema (Noite/Dia)","Opcoes","nRF24"};
     snprintf(out,n,"%s", items[idx]);
   } else if (m==M_OPTIONS){
     switch(idx){
@@ -312,7 +309,7 @@ void renderCalibration(){
   const uint8_t totalW = 8*barW + 7*gap;     // 124 px
   const uint8_t x0 = (128 - totalW)/2;       // centraliza → 2 px
   const uint8_t r = 5;                       // raio dos círculos
-  const uint8_t cy = 62;                     // y dos círculos (quase no rodapé)
+  const uint8_t cy = 56;                     // y dos círculos (quase no rodapé)
   const uint8_t c1x = 128/2 - 24;            // posições x dos círculos
   const uint8_t c2x = 128/2 + 24;
 
