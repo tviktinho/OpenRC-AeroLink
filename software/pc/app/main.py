@@ -1,8 +1,6 @@
 import json
 import os
 import sys
-import threading
-import time
 from typing import Dict, Any
 
 # Prefer the free community fork first, then fall back to PySimpleGUI
@@ -28,6 +26,13 @@ try:
 except Exception:  # pragma: no cover
     ctypes = None  # type: ignore
 
+from bridge_core import BridgeWorker, list_serial_ports
+
+
+APP_NAME = "OpenRC-AeroLink"
+CFG_FILE = "config.json"
+
+
 def _fatal_popup(msg: str) -> None:
     try:
         if sys.platform.startswith("win") and ctypes is not None:
@@ -38,12 +43,6 @@ def _fatal_popup(msg: str) -> None:
     except Exception:
         pass
     sys.exit(1)
-
-from bridge_core import BridgeWorker, list_serial_ports
-
-
-APP_NAME = "OpenRC-AeroLink"
-CFG_FILE = "config.json"
 
 
 def get_config_path() -> str:
@@ -113,16 +112,30 @@ def run_gui() -> None:
     if cfg.get("com_port") and cfg["com_port"] not in ports:
         ports = [cfg["com_port"]] + ports
 
+    # Potentiometer bars (P0..P7)
+    bars_col = []
+    for i in range(8):
+        bars_col.append([
+            sg.Text(f"P{i}", size=(3, 1)),
+            sg.ProgressBar(max_value=255, orientation="h", size=(30, 15), key=f"-PB-{i}-"),
+            sg.Text("000", key=f"-PV-{i}-", size=(4, 1)),
+        ])
+
     layout = [
-        [sg.Text("Porta COM:"), sg.Combo(ports, key="-PORT-", default_value=cfg.get("com_port", ""), size=(20, 1)),
+        [sg.Text("Porta COM:"), sg.Combo(ports, key="-PORT-", default_value=cfg.get("com_port", ""), size=(20, 1), readonly=True),
          sg.Button("Atualizar", key="-REFRESH-")],
+        [sg.Frame("Switches", [[
+            sg.Checkbox("S1", key="-S1-LED-", disabled=True),
+            sg.Checkbox("S2", key="-S2-LED-", disabled=True),
+        ]])],
         [sg.Text("Switch 1 (tecla):"), sg.Input(cfg.get("sw1_key", "g"), key="-SW1-", size=(10, 1)),
          sg.Text("Switch 2 (tecla):"), sg.Input(cfg.get("sw2_key", "r"), key="-SW2-", size=(10, 1))],
         [sg.Button("Iniciar", key="-START-", button_color=("white", "green")),
          sg.Button("Parar", key="-STOP-", disabled=True),
          sg.Button("Salvar", key="-SAVE-"),
          sg.Button("Sair", key="-EXIT-")],
-        [sg.Multiline("", key="-LOG-", size=(80, 20), autoscroll=True, reroute_stdout=True, reroute_stderr=True, write_only=True)],
+        [sg.Frame("Potenciômetros", [[sg.Column(bars_col)]], expand_x=True)],
+        [sg.Multiline("", key="-LOG-", size=(80, 12), autoscroll=True, reroute_stdout=True, reroute_stderr=True, write_only=True, disabled=True)],
     ]
 
     window = sg.Window(f"{APP_NAME} Bridge", layout, finalize=True)
@@ -136,9 +149,15 @@ def run_gui() -> None:
 
     def log(msg: str) -> None:
         try:
+            window["-LOG-"].update(disabled=False)
             window["-LOG-"].print(msg)
         except Exception:
             pass
+        finally:
+            try:
+                window["-LOG-"].update(disabled=True)
+            except Exception:
+                pass
 
     def set_running_state(running: bool) -> None:
         window["-START-"].update(disabled=running)
@@ -182,6 +201,12 @@ def run_gui() -> None:
             save_config(cfg)
 
             # Create and start worker
+            def post_data(payload: Dict[str, Any]) -> None:
+                try:
+                    window.write_event_value("-DATA-", payload)
+                except Exception:
+                    pass
+
             worker = BridgeWorker(
                 com_port=com,
                 baud=cfg.get("baud", 115200),
@@ -193,9 +218,14 @@ def run_gui() -> None:
                 smooth_n=cfg.get("smooth_n", 0),
                 invert=cfg.get("invert", [False] * 8),
                 log=log,
+                on_data=post_data,
             )
             set_running_state(True)
             worker.start()
+            try:
+                window.refresh()
+            except Exception:
+                pass
             log("Execução iniciada.")
 
         # Poll worker status to auto-reset UI if it stops
@@ -208,6 +238,27 @@ def run_gui() -> None:
         if worker and not worker.is_running and window["-STOP-"].Disabled is False:
             # Worker stopped on its own
             set_running_state(False)
+
+        # Live data updates from worker
+        if event == "-DATA-":
+            data = values.get("-DATA-", {}) or {}
+            pots = data.get("pots") or []
+            # Update switch indicators
+            try:
+                s1 = 1 if data.get("s1") else 0
+                s2 = 1 if data.get("s2") else 0
+                window["-S1-LED-"].update(value=bool(s1), text_color=("green" if s1 else "red"))
+                window["-S2-LED-"].update(value=bool(s2), text_color=("green" if s2 else "red"))
+            except Exception:
+                pass
+            if isinstance(pots, (list, tuple)) and len(pots) >= 8:
+                for i in range(8):
+                    try:
+                        v = int(pots[i])
+                        window[f"-PB-{i}-"].update(current_count=max(0, min(255, v)))
+                        window[f"-PV-{i}-"].update(f"{v:03d}")
+                    except Exception:
+                        pass
 
     window.close()
 

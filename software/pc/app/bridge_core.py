@@ -2,7 +2,7 @@ import sys
 import time
 from collections import deque
 from threading import Event, Thread
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Dict, Any
 
 try:
     import serial
@@ -71,6 +71,7 @@ class BridgeWorker:
         smooth_n: int = 0,
         invert: Optional[Sequence[bool]] = None,
         log: Optional[Callable[[str], None]] = None,
+        on_data: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.com_port = com_port
         self.baud = baud
@@ -83,6 +84,7 @@ class BridgeWorker:
         self.smooth_n = max(0, smooth_n)
         self.invert = list(invert) if invert is not None else [False] * 8
         self.log = log or (lambda msg: None)
+        self.on_data = on_data
 
         self._thread: Optional[Thread] = None
         self._stop = Event()
@@ -147,6 +149,8 @@ class BridgeWorker:
         dbg_bad_lines = 0
         last_s1_on: Optional[int] = None
         last_s2_on: Optional[int] = None
+        last_emit = 0.0
+        emit_interval = 0.03  # ~33 Hz UI updates
 
         try:
             while not self._stop.is_set():
@@ -218,6 +222,18 @@ class BridgeWorker:
                 if last_s2_on is None or s2_on != last_s2_on:
                     self._tap_key(self.sw2_key)
                     last_s2_on = s2_on
+
+                # Emit live data for GUI (throttled)
+                if self.on_data is not None and (now - last_emit) >= emit_interval:
+                    try:
+                        self.on_data({
+                            "pots": pots,
+                            "s1": s1_on,
+                            "s2": s2_on,
+                        })
+                    except Exception:
+                        pass
+                    last_emit = now
 
         except Exception as e:
             self.log(f"[ERRO] Execução interrompida: {e}")
