@@ -29,6 +29,11 @@ except Exception:  # pragma: no cover
 from bridge_core import BridgeWorker, list_serial_ports
 
 
+def resource_path(name: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
+    return os.path.join(base, name)
+
+
 APP_NAME = "OpenRC-AeroLink"
 CFG_FILE = "config.json"
 
@@ -138,7 +143,12 @@ def run_gui() -> None:
         [sg.Multiline("", key="-LOG-", size=(80, 12), autoscroll=True, reroute_stdout=True, reroute_stderr=True, write_only=True, disabled=True)],
     ]
 
-    window = sg.Window(f"{APP_NAME} Bridge", layout, finalize=True)
+    window = sg.Window(
+        f"{APP_NAME} Bridge",
+        layout,
+        finalize=True,
+        icon=resource_path("icon.ico"),
+    )
 
     worker: "BridgeWorker | None"
     try:
