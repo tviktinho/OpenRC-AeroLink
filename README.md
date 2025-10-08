@@ -7,7 +7,6 @@ Baseado em **Arduino (Nano/Mega)**, **ESP8266/ESP32** e **nRF24L01 PA/LNA**, o p
 
 ## 📸 Visão Geral
 ![Controle Frontal](docs/images/frente.jpg)
-![Controle Interno](docs/images/interno.jpg)
 ![Controle Interno](docs/images/interno_pelado.jpg)
 ![Controle Interno](docs/images/interno_2.jpg)
 ![Controle Interno](docs/images/interno_3.jpg)
