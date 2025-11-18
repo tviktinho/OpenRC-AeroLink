@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ground Station - ESP32 FC</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: #e0e0e0; text-align: center; padding: 10px; margin: 0; }
+        .container { max-width: 600px; margin: auto; background: #2d2d2d; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h2 { border-bottom: 2px solid #444; padding-bottom: 15px; margin-top: 0; color: #4db8ff; }
+        h3 { color: #aaa; margin-top: 25px; margin-bottom: 10px; text-align: left; padding-left: 10px; border-left: 4px solid #4db8ff; }
+        
+        .control-group { display: flex; align-items: center; margin: 10px 0; background: #3a3a3a; padding: 12px; border-radius: 8px; }
+        label { width: 50px; font-weight: bold; color: #fff; }
+        input[type=range] { flex-grow: 1; margin: 0 15px; cursor: pointer; }
+        input[type=number] { width: 70px; padding: 8px; border-radius: 6px; border: none; background: #555; color: #fff; text-align: center; font-weight: bold; }
+        
+        .btn-group { margin-top: 30px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+        button { padding: 12px; font-size: 14px; font-weight: bold; cursor: pointer; border: none; border-radius: 8px; color: white; transition: transform 0.1s; }
+        button:active { transform: scale(0.96); }
+        
+        .btn-save { background-color: #28a745; } 
+        .btn-cal { background-color: #ffc107; color: #333; } 
+        .btn-load { background-color: #007bff; } 
+        
+        #status-log { margin-top: 20px; padding: 10px; background: #222; border-radius: 6px; font-size: 13px; color: #00ff00; font-family: monospace; min-height: 20px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>✈️ Controle de Voo</h2>
+
+    <h3>Roll (Aileron)</h3>
+    <div class="control-group">
+        <label>Kp</label>
+        <input type="range" min="0" max="10" step="0.01" id="range_kp_roll" oninput="syncInput('kp_roll', this.value)" onchange="sendPid('kp_roll', this.value)">
+        <input type="number" id="num_kp_roll" step="0.01" onchange="updateFromNum('kp_roll', this.value)">
+    </div>
+    <div class="control-group">
+        <label>Ki</label>
+        <input type="range" min="0" max="5" step="0.01" id="range_ki_roll" oninput="syncInput('ki_roll', this.value)" onchange="sendPid('ki_roll', this.value)">
+        <input type="number" id="num_ki_roll" step="0.01" onchange="updateFromNum('ki_roll', this.value)">
+    </div>
+    <div class="control-group">
+        <label>Kd</label>
+        <input type="range" min="0" max="2" step="0.001" id="range_kd_roll" oninput="syncInput('kd_roll', this.value)" onchange="sendPid('kd_roll', this.value)">
+        <input type="number" id="num_kd_roll" step="0.001" onchange="updateFromNum('kd_roll', this.value)">
+    </div>
+
+    <h3>Pitch (Elevator)</h3>
+    <div class="control-group">
+        <label>Kp</label>
+        <input type="range" min="0" max="10" step="0.01" id="range_kp_pitch" oninput="syncInput('kp_pitch', this.value)" onchange="sendPid('kp_pitch', this.value)">
+        <input type="number" id="num_kp_pitch" step="0.01" onchange="updateFromNum('kp_pitch', this.value)">
+    </div>
+    <div class="control-group">
+        <label>Ki</label>
+        <input type="range" min="0" max="5" step="0.01" id="range_ki_pitch" oninput="syncInput('ki_pitch', this.value)" onchange="sendPid('ki_pitch', this.value)">
+        <input type="number" id="num_ki_pitch" step="0.01" onchange="updateFromNum('ki_pitch', this.value)">
+    </div>
+    <div class="control-group">
+        <label>Kd</label>
+        <input type="range" min="0" max="2" step="0.001" id="range_kd_pitch" oninput="syncInput('kd_pitch', this.value)" onchange="sendPid('kd_pitch', this.value)">
+        <input type="number" id="num_kd_pitch" step="0.001" onchange="updateFromNum('kd_pitch', this.value)">
+    </div>
+
+    <div class="btn-group">
+        <button class="btn-load" onclick="loadPids()">🔄 Recarregar</button>
+        <button class="btn-cal" onclick="calibrateGyro()">⚖️ Calibrar Giro</button>
+        <button class="btn-save" onclick="saveToFlash()">💾 Salvar Flash</button>
+    </div>
+
+    <div id="status-log">Conectado.</div>
+</div>
+
+<script>
+    const API_URL = ""; // Relativo ao Host atual
+
+    function log(msg, type="normal") {
+        const el = document.getElementById('status-log');
+        el.innerText = msg;
+        el.style.color = type === "error" ? "#ff4444" : "#00ff00";
+    }
+
+    function syncInput(param, val) {
+        document.getElementById('num_' + param).value = val;
+        document.getElementById('range_' + param).value = val;
+    }
+
+    function updateFromNum(param, val) {
+        syncInput(param, val);
+        sendPid(param, val);
+    }
+
+    async function sendPid(param, val) {
+        log(`Enviando ${param}...`);
+        try {
+            const res = await fetch(API_URL + '/api/set', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ param: param, value: parseFloat(val) })
+            });
+            const data = await res.json();
+            if(data.status === 'ok') log(`✅ ${param} definido para ${val}`);
+            else log(`❌ Erro: ${data.msg}`, "error");
+        } catch (e) { log("❌ Erro de Conexão", "error"); }
+    }
+
+    async function loadPids() {
+        log("Lendo PIDs...");
+        try {
+            const res = await fetch(API_URL + '/api/get', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ param: 'pids' })
+            });
+            const data = await res.json();
+            
+            if(data.status === 'data') {
+                const p = data.pids;
+                syncInput('kp_roll', p.kp_r); syncInput('ki_roll', p.ki_r); syncInput('kd_roll', p.kd_r);
+                syncInput('kp_pitch', p.kp_p); syncInput('ki_pitch', p.ki_p); syncInput('kd_pitch', p.kd_p);
+                log("✅ Dados Recebidos");
+            } else {
+                log(`❌ Erro: ${data.msg}`, "error");
+            }
+        } catch (e) { log("❌ Falha ao conectar com RPi", "error"); }
+    }
+
+    async function calibrateGyro() {
+        if(!confirm("Mantenha o drone imóvel. Continuar?")) return;
+        log("Calibrando... Aguarde...");
+        try {
+            const res = await fetch(API_URL + '/api/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: 'cal_gyro' })
+            });
+            const data = await res.json();
+            log(data.msg);
+        } catch (e) { log("❌ Erro de Rede", "error"); }
+    }
+
+    async function saveToFlash() {
+        if(!confirm("Salvar permanentemente?")) return;
+        log("Salvando...");
+        try {
+            const res = await fetch(API_URL + '/api/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: 'save_pids' })
+            });
+            const data = await res.json();
+            if(data.status === 'ok') log("✅ Salvo com sucesso!");
+            else log(`❌ Erro: ${data.msg}`, "error");
+        } catch (e) { log("❌ Erro de Rede", "error"); }
+    }
+
+    window.onload = loadPids;
+</script>
+
+</body>
+</html>

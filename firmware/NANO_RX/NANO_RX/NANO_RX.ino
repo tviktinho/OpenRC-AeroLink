@@ -24,9 +24,13 @@ struct Packet {
 const uint8_t SERVO_PINS[8] = {3, 4, 5, 6, 9, 10, 14, 15}; // 14=A0, 15=A1 como digitais
 const uint8_t SW1_OUT = 16; // A2 como digital
 const uint8_t SW2_OUT = 17; // A3 como digital
+const uint8_t RX_LED_PIN = LED_BUILTIN;
 Servo servos[8];
 
 unsigned long lastPacketMs = 0;
+unsigned long lastLedMs = 0;
+bool packetLedOn = false;
+uint32_t packetCount = 0;
 
 // -------- Debug em porta separada --------
 #define DBG_TX_PIN 4           // D4 -> RX do seu USB-TTL
@@ -72,12 +76,15 @@ void setup() {
   pinMode(SW2_OUT, OUTPUT);
   digitalWrite(SW1_OUT, LOW);
   digitalWrite(SW2_OUT, LOW);
+  pinMode(RX_LED_PIN, OUTPUT);
+  digitalWrite(RX_LED_PIN, LOW);
 }
 
 void loop() {
   if (radio.available()) {
     while (radio.available()) radio.read(&pkt, sizeof(pkt));
     lastPacketMs = millis();
+    packetCount++;
 
     // atualiza servos
     for (uint8_t i = 0; i < 8; i++) servos[i].writeMicroseconds(byteToUs(pkt.p[i]));
@@ -89,15 +96,26 @@ void loop() {
     // envia frame pro MEGA (na Serial "limpa")
     sendFrameToMega();
 
+    digitalWrite(RX_LED_PIN, HIGH);
+    packetLedOn = true;
+    lastLedMs = millis();
+
     // DEBUG (em porta separada D4) a cada ~200 ms
     static uint32_t tDbg=0;
     if (millis() - tDbg >= 200) {
       tDbg = millis();
-      DBG.print(F("CH: "));
+      DBG.print(F("[RX] CNT="));
+      DBG.print(packetCount);
+      DBG.print(F(" CH: "));
       for (uint8_t i=0;i<8;i++){ DBG.print(pkt.p[i]); DBG.print(' '); }
       DBG.print(F("| S1=")); DBG.print(pkt.s1);
       DBG.print(F(" S2=")); DBG.println(pkt.s2);
     }
+  }
+
+  if (packetLedOn && millis() - lastLedMs > 100) {
+    digitalWrite(RX_LED_PIN, LOW);
+    packetLedOn = false;
   }
 
   // Failsafe
