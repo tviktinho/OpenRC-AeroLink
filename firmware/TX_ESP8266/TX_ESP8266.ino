@@ -358,7 +358,11 @@ void applyDeltaSteps(int16_t steps){
 
 void setup(){
   pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW);
-  Serial.begin(115200);
+  Serial.begin(38400); // Alterado para 38400 para coincidir com o NANO
+
+  // Debug na segunda porta serial
+  Serial1.begin(115200); // Serial para debug
+  Serial1.println("Debug ESP8266 iniciado");
 
   // Encoder local
   pinMode(ENC_CLK, INPUT_PULLUP);
@@ -380,7 +384,18 @@ void loop(){
 
   // RX do NANO (somente cliques e status)
   Payload rx; bool got = readFrame(Serial, rx);
-  if (got){ cur=rx; tLastRx=millis(); }
+  if (got){ 
+    cur=rx; 
+    tLastRx=millis();
+    
+    // Debug dos dados recebidos
+    Serial1.print("Dados UART - SW: ");
+    Serial1.print(rx.sw, BIN);
+    Serial1.print(" Short clicks: ");
+    Serial1.print(rx.seqShort);
+    Serial1.print(" Long clicks: ");
+    Serial1.println(rx.seqLong);
+  }
 
   // detectar CAL do NANO e entrar/sair da Ui de calibração automaticamente
   bool calNow = cur.sw & 0x04;
