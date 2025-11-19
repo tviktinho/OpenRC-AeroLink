@@ -3,161 +3,260 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ground Station - ESP32 FC</title>
+    <title>Drone Control</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: #e0e0e0; text-align: center; padding: 10px; margin: 0; }
-        .container { max-width: 600px; margin: auto; background: #2d2d2d; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h2 { border-bottom: 2px solid #444; padding-bottom: 15px; margin-top: 0; color: #4db8ff; }
-        h3 { color: #aaa; margin-top: 25px; margin-bottom: 10px; text-align: left; padding-left: 10px; border-left: 4px solid #4db8ff; }
+        body { background-color: #121212; color: #e0e0e0; font-family: sans-serif; text-align: center; padding: 10px; margin: 0; }
+        .container { max-width: 600px; margin: auto; background: #1e1e1e; padding: 15px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        h2 { color: #00aaff; border-bottom: 1px solid #333; padding-bottom: 10px; margin-top: 0; }
         
-        .control-group { display: flex; align-items: center; margin: 10px 0; background: #3a3a3a; padding: 12px; border-radius: 8px; }
-        label { width: 50px; font-weight: bold; color: #fff; }
-        input[type=range] { flex-grow: 1; margin: 0 15px; cursor: pointer; }
-        input[type=number] { width: 70px; padding: 8px; border-radius: 6px; border: none; background: #555; color: #fff; text-align: center; font-weight: bold; }
+        /* Abas */
+        .tabs { display: flex; justify-content: center; gap: 5px; margin-bottom: 15px; }
+        .tab-btn { background: #333; border: none; color: #888; padding: 10px; flex: 1; cursor: pointer; border-radius: 5px; transition: 0.3s; }
+        .tab-btn.active { background: #00aaff; color: #fff; font-weight: bold; }
+        .tab-content { display: none; animation: fadeIn 0.3s; }
+        .tab-content.active { display: block; }
+
+        /* Controles */
+        .ctrl-row { display: flex; align-items: center; background: #2c2c2c; margin: 5px 0; padding: 8px; border-radius: 5px; }
+        label { width: 60px; font-weight: bold; font-size: 14px; }
+        input[type=range] { flex: 1; margin: 0 10px; cursor: pointer; }
+        input[type=number] { width: 60px; background: #444; color: #fff; border: none; padding: 5px; text-align: center; border-radius: 3px; }
         
-        .btn-group { margin-top: 30px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
-        button { padding: 12px; font-size: 14px; font-weight: bold; cursor: pointer; border: none; border-radius: 8px; color: white; transition: transform 0.1s; }
-        button:active { transform: scale(0.96); }
-        
-        .btn-save { background-color: #28a745; } 
-        .btn-cal { background-color: #ffc107; color: #333; } 
-        .btn-load { background-color: #007bff; } 
-        
-        #status-log { margin-top: 20px; padding: 10px; background: #222; border-radius: 6px; font-size: 13px; color: #00ff00; font-family: monospace; min-height: 20px; }
+        /* HUD */
+        .hud { background: black; color: lime; font-family: 'Courier New', monospace; padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; border: 1px solid #333; border-radius: 5px; }
+        .hud-val { color: #fff; }
+        .hud-warn { color: #f00; }
+
+        /* Botões Ação */
+        .btn-grp { margin-top: 20px; display: flex; gap: 10px; justify-content: center; }
+        button.act { flex: 1; padding: 12px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; color: white; }
+        .green { background: #28a745; } .yellow { background: #ffc107; color: black; } .blue { background: #007bff; }
+        button.act:active { transform: scale(0.98); }
+
+        #log { margin-top: 15px; font-size: 12px; color: #666; min-height: 15px; }
+        @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h2>✈️ Controle de Voo</h2>
+    <h2>🛸 Estação de Solo</h2>
 
-    <h3>Roll (Aileron)</h3>
-    <div class="control-group">
-        <label>Kp</label>
-        <input type="range" min="0" max="10" step="0.01" id="range_kp_roll" oninput="syncInput('kp_roll', this.value)" onchange="sendPid('kp_roll', this.value)">
-        <input type="number" id="num_kp_roll" step="0.01" onchange="updateFromNum('kp_roll', this.value)">
-    </div>
-    <div class="control-group">
-        <label>Ki</label>
-        <input type="range" min="0" max="5" step="0.01" id="range_ki_roll" oninput="syncInput('ki_roll', this.value)" onchange="sendPid('ki_roll', this.value)">
-        <input type="number" id="num_ki_roll" step="0.01" onchange="updateFromNum('ki_roll', this.value)">
-    </div>
-    <div class="control-group">
-        <label>Kd</label>
-        <input type="range" min="0" max="2" step="0.001" id="range_kd_roll" oninput="syncInput('kd_roll', this.value)" onchange="sendPid('kd_roll', this.value)">
-        <input type="number" id="num_kd_roll" step="0.001" onchange="updateFromNum('kd_roll', this.value)">
+    <div class="tabs">
+        <button id="btn_home" class="tab-btn active" onclick="openTab('home')">Voo & GPS</button>
+        <button id="btn_pids" class="tab-btn" onclick="openTab('pids')">Ajustes PID</button>
+        <button id="btn_rc" class="tab-btn" onclick="openTab('rc')">Rádio</button>
     </div>
 
-    <h3>Pitch (Elevator)</h3>
-    <div class="control-group">
-        <label>Kp</label>
-        <input type="range" min="0" max="10" step="0.01" id="range_kp_pitch" oninput="syncInput('kp_pitch', this.value)" onchange="sendPid('kp_pitch', this.value)">
-        <input type="number" id="num_kp_pitch" step="0.01" onchange="updateFromNum('kp_pitch', this.value)">
-    </div>
-    <div class="control-group">
-        <label>Ki</label>
-        <input type="range" min="0" max="5" step="0.01" id="range_ki_pitch" oninput="syncInput('ki_pitch', this.value)" onchange="sendPid('ki_pitch', this.value)">
-        <input type="number" id="num_ki_pitch" step="0.01" onchange="updateFromNum('ki_pitch', this.value)">
-    </div>
-    <div class="control-group">
-        <label>Kd</label>
-        <input type="range" min="0" max="2" step="0.001" id="range_kd_pitch" oninput="syncInput('kd_pitch', this.value)" onchange="sendPid('kd_pitch', this.value)">
-        <input type="number" id="num_kd_pitch" step="0.001" onchange="updateFromNum('kd_pitch', this.value)">
+    <div id="home" class="tab-content" style="display:block;">
+        <div class="hud">
+            <div>
+                MODE: <span id="h_mode" class="hud-val">---</span><br>
+                ROLL: <span id="h_roll" class="hud-val">0.0</span>°<br>
+                PTCH: <span id="h_pitch" class="hud-val">0.0</span>°<br>
+                THRT: <span id="h_thr" class="hud-val">0</span>
+            </div>
+            <div style="text-align:right;">
+                FIX: <span id="h_fix" class="hud-warn">NO</span><br>
+                SAT: <span id="h_sats" class="hud-val">0</span><br>
+                ALT: <span id="h_alt" class="hud-val">0.0</span> m<br>
+                BAT: ---
+            </div>
+        </div>
+        
+        <div style="margin-top:10px; display:flex; justify-content:center;">
+            <canvas id="attCanvas" width="300" height="150" style="background:#111; border-radius:5px; border:1px solid #444;"></canvas>
+        </div>
+        
+        <div style="margin-top:10px; font-size:12px; font-family:monospace; color:#aaa;">
+            GPS: <span id="h_lat">0.00000</span>, <span id="h_lon">0.00000</span>
+        </div>
+        
+        <div class="btn-grp">
+             <button class="act yellow" onclick="doAct('cal_gyro')">Calibrar Giro</button>
+             <button class="act blue" onclick="doAct('cal_baro')">Zerar Alt</button>
+        </div>
     </div>
 
-    <div class="btn-group">
-        <button class="btn-load" onclick="loadPids()">🔄 Recarregar</button>
-        <button class="btn-cal" onclick="calibrateGyro()">⚖️ Calibrar Giro</button>
-        <button class="btn-save" onclick="saveToFlash()">💾 Salvar Flash</button>
+    <div id="pids" class="tab-content">
+        <h3>Roll</h3>
+        <div class="ctrl-row"><label>Kp</label><input type="range" id="rkp_s" min="0" max="5" step="0.01" oninput="syncLocal('rkp',this.value)" onchange="set('kp_roll',this.value)"><input type="number" id="rkp_n" onchange="updateFromNum('kp_roll',this.value)"></div>
+        <div class="ctrl-row"><label>Ki</label><input type="range" id="rki_s" min="0" max="2" step="0.01" oninput="syncLocal('rki',this.value)" onchange="set('ki_roll',this.value)"><input type="number" id="rki_n" onchange="updateFromNum('ki_roll',this.value)"></div>
+        <div class="ctrl-row"><label>Kd</label><input type="range" id="rkd_s" min="0" max="1" step="0.001" oninput="syncLocal('rkd',this.value)" onchange="set('kd_roll',this.value)"><input type="number" id="rkd_n" onchange="updateFromNum('kd_roll',this.value)"></div>
+
+        <h3>Pitch</h3>
+        <div class="ctrl-row"><label>Kp</label><input type="range" id="pkp_s" min="0" max="5" step="0.01" oninput="syncLocal('pkp',this.value)" onchange="set('kp_pitch',this.value)"><input type="number" id="pkp_n" onchange="updateFromNum('kp_pitch',this.value)"></div>
+        <div class="ctrl-row"><label>Ki</label><input type="range" id="pki_s" min="0" max="2" step="0.01" oninput="syncLocal('pki',this.value)" onchange="set('ki_pitch',this.value)"><input type="number" id="pki_n" onchange="updateFromNum('ki_pitch',this.value)"></div>
+        <div class="ctrl-row"><label>Kd</label><input type="range" id="pkd_s" min="0" max="1" step="0.001" oninput="syncLocal('pkd',this.value)" onchange="set('kd_pitch',this.value)"><input type="number" id="pkd_n" onchange="updateFromNum('kd_pitch',this.value)"></div>
+
+        <div class="btn-grp">
+            <button class="act blue" onclick="loadPids()">Ler ESP32</button>
+            <button class="act green" onclick="doAct('save_pids')">Salvar Flash</button>
+        </div>
     </div>
 
-    <div id="status-log">Conectado.</div>
+    <div id="rc" class="tab-content">
+        <div id="rc_bars" style="text-align:left; margin-bottom:20px; font-size:14px; color:#aaa;">
+            (Monitoramento RC Futuro)
+        </div>
+        <button class="act yellow" style="width:100%" onclick="doAct('cal_rc')">Calibrar Sticks (5s)</button>
+    </div>
+
+    <div id="log">Carregando...</div>
 </div>
 
 <script>
-    const API_URL = ""; // Relativo ao Host atual
+    const API = ""; // Vazio = mesmo host
+    let att = {r:0, p:0};
 
-    function log(msg, type="normal") {
-        const el = document.getElementById('status-log');
-        el.innerText = msg;
-        el.style.color = type === "error" ? "#ff4444" : "#00ff00";
+    // --- UI FUNCTIONS CORRIGIDA ---
+    function openTab(name) {
+        // Esconde todos os conteúdos
+        document.querySelectorAll('.tab-content').forEach(x => x.style.display='none');
+        // Tira 'active' de todos os botões
+        document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+        
+        // Mostra o desejado
+        const content = document.getElementById(name);
+        if(content) content.style.display = 'block';
+        
+        // Ativa o botão correto pelo ID
+        const btn = document.getElementById('btn_' + name);
+        if(btn) btn.classList.add('active');
     }
 
-    function syncInput(param, val) {
-        document.getElementById('num_' + param).value = val;
-        document.getElementById('range_' + param).value = val;
+    function log(m, err=false) { 
+        const l = document.getElementById('log'); 
+        if(l) { l.innerText = m; l.style.color = err ? '#ff4444' : '#00ff00'; }
     }
 
-    function updateFromNum(param, val) {
-        syncInput(param, val);
-        sendPid(param, val);
+    // Sincroniza Slider <-> Numero visualmente
+    function syncLocal(prefix, val) {
+        const n = document.getElementById(prefix + '_n');
+        if(n) n.value = val;
     }
 
-    async function sendPid(param, val) {
-        log(`Enviando ${param}...`);
+    // Atualiza UI com valores vindos do servidor
+    function upUI(id, v) { 
+        if(document.getElementById(id+'_s')) document.getElementById(id+'_s').value = v; 
+        if(document.getElementById(id+'_n')) document.getElementById(id+'_n').value = v; 
+    }
+
+    function paramToId(p) {
+        // converte kp_roll -> rkp
+        const axis = p.split('_')[1][0]; // r ou p
+        const type = p.split('_')[0];    // kp, ki, kd
+        return axis + type;
+    }
+
+    // --- API CALLS ---
+    async function post(ep, d) {
         try {
-            const res = await fetch(API_URL + '/api/set', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ param: param, value: parseFloat(val) })
-            });
-            const data = await res.json();
-            if(data.status === 'ok') log(`✅ ${param} definido para ${val}`);
-            else log(`❌ Erro: ${data.msg}`, "error");
-        } catch (e) { log("❌ Erro de Conexão", "error"); }
+            const r = await fetch(API+'/api/'+ep, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(d)});
+            return await r.json();
+        } catch(e) { 
+            log("Desconectado", true); 
+            return null; 
+        }
     }
 
     async function loadPids() {
         log("Lendo PIDs...");
-        try {
-            const res = await fetch(API_URL + '/api/get', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ param: 'pids' })
-            });
-            const data = await res.json();
+        const d = await post('get', {param:'pids'});
+        if(d && d.status==='data' && d.pids) {
+            const p = d.pids;
+            upUI('rkp', p.kp_r); upUI('rki', p.ki_r); upUI('rkd', p.kd_r);
+            upUI('pkp', p.kp_p); upUI('pki', p.ki_p); upUI('pkd', p.kd_p);
+            log("Pronto.");
+        } else {
+            log("Falha leitura PIDs", true);
+        }
+    }
+
+    async function set(p, v) { 
+        // Atualiza UI numérica caso tenha vindo do slider
+        syncLocal(paramToId(p), v);
+        // Envia
+        await post('set', {param:p, value:parseFloat(v)}); 
+    }
+    
+    function updateFromNum(p, v) {
+        // Chamado quando digita numero manualmente
+        const prefix = paramToId(p);
+        if(document.getElementById(prefix+'_s')) document.getElementById(prefix+'_s').value = v;
+        set(p, v);
+    }
+
+    async function doAct(n) { 
+        if(confirm("Confirmar ação?")) { 
+            const r = await post('action', {name:n}); 
+            if(r) log(r.msg || "Enviado");
+        } 
+    }
+
+    // --- TELEMETRIA LOOP (2Hz) ---
+    setInterval(async ()=>{
+        // Se a aba PIDs estiver aberta, evita pedir telemetria para não engasgar o carregamento
+        if(document.getElementById('pids').style.display === 'block') return;
+
+        const d = await post('get', {param:'telemetry'});
+        if(d) {
+            // HUD
+            document.getElementById('h_roll').innerText = d.roll.toFixed(1);
+            document.getElementById('h_pitch').innerText = d.pitch.toFixed(1);
+            document.getElementById('h_mode').innerText = d.mode;
+            document.getElementById('h_mode').style.color = d.mode==="MANUAL"?"#f44":"#0f0";
+            document.getElementById('h_thr').innerText = d.throttle;
             
-            if(data.status === 'data') {
-                const p = data.pids;
-                syncInput('kp_roll', p.kp_r); syncInput('ki_roll', p.ki_r); syncInput('kd_roll', p.kd_r);
-                syncInput('kp_pitch', p.kp_p); syncInput('ki_pitch', p.ki_p); syncInput('kd_pitch', p.kd_p);
-                log("✅ Dados Recebidos");
-            } else {
-                log(`❌ Erro: ${data.msg}`, "error");
-            }
-        } catch (e) { log("❌ Falha ao conectar com RPi", "error"); }
+            // GPS
+            const fix = d.fix;
+            document.getElementById('h_fix').innerText = fix ? "3D FIX" : "NO";
+            document.getElementById('h_fix').style.color = fix ? "#0f0" : "#555";
+            document.getElementById('h_sats').innerText = d.sats;
+            document.getElementById('h_lat').innerText = d.lat.toFixed(5);
+            document.getElementById('h_lon').innerText = d.lon.toFixed(5);
+            
+            // Baro
+            document.getElementById('h_alt').innerText = d.alt.toFixed(1);
+
+            // Desenhar Horizonte
+            att.r = d.roll; att.p = d.pitch;
+            drawHoriz();
+            log("Conectado");
+        }
+    }, 500);
+
+    function drawHoriz() {
+        const c = document.getElementById('attCanvas');
+        if(!c) return;
+        const ctx = c.getContext('2d');
+        const w=c.width, h=c.height;
+        ctx.clearRect(0,0,w,h);
+        
+        ctx.save();
+        ctx.translate(w/2, h/2);
+        ctx.rotate(-att.r * Math.PI/180);
+        ctx.translate(0, att.p * 2); // Sensibilidade visual do pitch
+        
+        ctx.fillStyle = '#3498db'; ctx.fillRect(-w,-h*2,w*2,h*2); // Céu
+        ctx.fillStyle = '#8e44ad'; ctx.fillRect(-w,0,w*2,h*2);   // Terra
+        ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(-w,0); ctx.lineTo(w,0); ctx.stroke();
+        ctx.restore();
+        
+        // Retículo Amarelo
+        ctx.strokeStyle='#ffd700'; ctx.lineWidth=3; ctx.beginPath();
+        ctx.moveTo(w/2-30,h/2); ctx.lineTo(w/2-10,h/2); // Asa esq
+        ctx.moveTo(w/2+10,h/2); ctx.lineTo(w/2+30,h/2); // Asa dir
+        ctx.moveTo(w/2, h/2-5); ctx.lineTo(w/2, h/2+5); // Centro
+        ctx.stroke();
     }
 
-    async function calibrateGyro() {
-        if(!confirm("Mantenha o drone imóvel. Continuar?")) return;
-        log("Calibrando... Aguarde...");
-        try {
-            const res = await fetch(API_URL + '/api/action', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name: 'cal_gyro' })
-            });
-            const data = await res.json();
-            log(data.msg);
-        } catch (e) { log("❌ Erro de Rede", "error"); }
-    }
+    // Inicialização
+    window.onload = () => { 
+        loadPids(); 
+        openTab('home'); // Começa na aba HUD
+    };
 
-    async function saveToFlash() {
-        if(!confirm("Salvar permanentemente?")) return;
-        log("Salvando...");
-        try {
-            const res = await fetch(API_URL + '/api/action', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name: 'save_pids' })
-            });
-            const data = await res.json();
-            if(data.status === 'ok') log("✅ Salvo com sucesso!");
-            else log(`❌ Erro: ${data.msg}`, "error");
-        } catch (e) { log("❌ Erro de Rede", "error"); }
-    }
-
-    window.onload = loadPids;
 </script>
 
 </body>
