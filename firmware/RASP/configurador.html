@@ -100,6 +100,28 @@
             (Monitoramento RC Futuro)
         </div>
         <button class="act yellow" style="width:100%" onclick="doAct('cal_rc')">Calibrar Sticks (5s)</button>
+        <div style="height:12px"></div>
+
+        <!-- NOVOS CONTROLES DE TRIM -->
+        <div style="text-align:left; margin-top:10px;">
+            <button class="act blue" style="width:100%; margin-bottom:8px;" onclick="loadRc()">Ler RC do ESP32</button>
+            <div class="ctrl-row"><label>Deadz</label><input type="range" id="dead_s" min="0" max="0.45" step="0.01" oninput="syncLocal('dead',this.value)" onchange="setRC('deadzone',this.value)"><input type="number" id="dead_n" min="0" max="0.45" step="0.01" onchange="updateRCFromNum('deadzone',this.value)"></div>
+            <div style="font-size:13px; color:#bbb; margin-top:6px;">Servo trims (L/R) e trims por canal</div>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+                <div style="flex:1;">
+                    <div class="ctrl-row"><label>SrvL</label><input type="range" id="srv_l_s" min="-200" max="200" step="1" oninput="syncLocal('srv_l',this.value)" onchange="setRC('trim_servo_l',this.value)"><input type="number" id="srv_l_n" onchange="updateRCFromNum('trim_servo_l',this.value)"></div>
+                </div>
+                <div style="flex:1;">
+                    <div class="ctrl-row"><label>SrvR</label><input type="range" id="srv_r_s" min="-200" max="200" step="1" oninput="syncLocal('srv_r',this.value)" onchange="setRC('trim_servo_r',this.value)"><input type="number" id="srv_r_n" onchange="updateRCFromNum('trim_servo_r',this.value)"></div>
+                </div>
+            </div>
+
+            <div id="ch_trims" style="margin-top:10px;"></div>
+
+            <div class="btn-grp" style="margin-top:10px;">
+                <button class="act green" onclick="saveRcAll()">Salvar Trims no ESP</button>
+            </div>
+        </div>
     </div>
 
     <div id="log">Carregando...</div>
@@ -192,6 +214,68 @@
             const r = await post('action', {name:n}); 
             if(r) log(r.msg || "Enviado");
         } 
+    }
+
+    async function loadRc() {
+        log("Lendo RC...");
+        const d = await post('get', {param:'rc'});
+        if (d && d.status === 'data' && d.rc) {
+            const rc = d.rc;
+            // deadzone
+            upUI('dead', parseFloat(rc.deadzone || 0.05));
+            // servo trims
+            upUI('srv_l', rc.servo_trim_l || 0);
+            upUI('srv_r', rc.servo_trim_r || 0);
+            // centers & trim array
+            const trims = rc.trim || [];
+            const centers = rc.centers || [];
+            const chDiv = document.getElementById('ch_trims');
+            chDiv.innerHTML = '';
+            for (let i = 0; i < 8; i++) {
+                const t = trims[i] || 0;
+                const c = centers[i] || 1500;
+                const row = document.createElement('div');
+                row.className = 'ctrl-row';
+                row.innerHTML = `<label>CH${i+1}</label><input type='range' id='ch${i+1}_s' min='-400' max='400' step='1' oninput="syncLocal('ch${i+1}',this.value)" onchange="setRC('trim_ch${i+1}',this.value)"><input type='number' id='ch${i+1}_n' onchange="updateRCFromNum('trim_ch${i+1}',this.value)">`;
+                chDiv.appendChild(row);
+                upUI('ch'+(i+1), t);
+            }
+            log('RC carregado');
+        } else { log('Falha leitura RC', true); }
+    }
+
+    async function setRC(param, value) {
+        await post('set', {param:param, value:parseFloat(value)});
+    }
+
+    function updateRCFromNum(p, v) {
+        // p is like trim_servo_l or trim_ch1 or deadzone
+        if (p.startsWith('trim_ch')) {
+            const idx = p.slice(7);
+            if (document.getElementById('ch'+idx+'_s')) document.getElementById('ch'+idx+'_s').value = v;
+        } else if (p === 'trim_servo_l') {
+            if (document.getElementById('srv_l_s')) document.getElementById('srv_l_s').value = v;
+        } else if (p === 'trim_servo_r') {
+            if (document.getElementById('srv_r_s')) document.getElementById('srv_r_s').value = v;
+        } else if (p === 'deadzone') {
+            if (document.getElementById('dead_s')) document.getElementById('dead_s').value = v;
+        }
+        setRC(p, v);
+    }
+
+    async function saveRcAll() {
+        if (!confirm('Salvar trims e deadzone no ESP32?')) return;
+        const sl = parseInt(document.getElementById('srv_l_n').value || 0);
+        const sr = parseInt(document.getElementById('srv_r_n').value || 0);
+        const dz = parseFloat(document.getElementById('dead_n').value || 0.05);
+        const trims = [];
+        for (let i = 1; i <= 8; i++) {
+            trims.push(parseInt(document.getElementById('ch' + i + '_n').value || 0));
+        }
+        const payload = { param: 'rc_all', deadzone: dz, servo_trim_l: sl, servo_trim_r: sr, trim: trims };
+        const res = await post('set', payload);
+        if (res && res.status === 'ok') alert('Trims salvos (rc_all)');
+        else alert('Falha ao salvar (rc_all)');
     }
 
     // --- TELEMETRIA LOOP (2Hz) ---
