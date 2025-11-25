@@ -197,7 +197,24 @@ def api_get():
 @app.route('/api/set', methods=['POST'])
 def api_set():
     d = request.json
-    cmd = json.dumps({"cmd":"set", "param":d['param'], "value":d['value']})
+    # Suporte para envio agrupado de RC (rc_all)
+    if d.get('param') == 'rc_all':
+        # Monta o JSON exatamente como o ESP32 espera
+        cmd_dict = {"cmd": "set", "param": "rc_all"}
+        # Campos opcionais
+        if 'deadzone' in d:
+            cmd_dict['deadzone'] = d['deadzone']
+        if 'servo_trim_l' in d:
+            cmd_dict['servo_trim_l'] = d['servo_trim_l']
+        if 'servo_trim_r' in d:
+            cmd_dict['servo_trim_r'] = d['servo_trim_r']
+        if 'trim' in d and isinstance(d['trim'], list):
+            cmd_dict['trim'] = d['trim']
+        cmd = json.dumps(cmd_dict)
+        return talk_to_esp(cmd)
+
+    # comportamento antigo para parâmetros simples (param + value)
+    cmd = json.dumps({"cmd":"set", "param":d['param'], "value":d.get('value')})
     return talk_to_esp(cmd)
 
 @app.route('/api/action', methods=['POST'])
