@@ -30,6 +30,30 @@ Servo esc, srvL, srvR;
 struct Packet { uint8_t p[8]; uint8_t s1; uint8_t s2; } pkt;
 const byte RADIO_ADDR[6] = "00001";
 
+// === Mapeamento de canais (igual ao 14-BRIZA) ===
+const uint8_t CH_THR = 0;    // throttle
+const uint8_t CH_ELE = 3;    // pitch (elevator)
+const uint8_t CH_AIL = 2;    // roll  (aileron)
+
+// === Limites PWM ===
+const int PWM_MIN  = 1000;
+const int PWM_MAX  = 2000;
+const int PWM_IDLE = 1000;   // motor cortado
+
+// === Throws (ganhos) para elevon — igual 14-BRIZA ===
+float G_E = 2.55f;   // ganho de pitch
+float G_A = 2.55f;   // ganho de roll
+
+// === Expo (0..0.6 aprox) ===
+float EXPO_E = 0.25f;
+float EXPO_A = 0.25f;
+
+// === Diferencial (mais UP que DOWN) ===
+float DIFF = -0.30f;  // 30% menos deflexão para baixo
+
+// === Reflexo (neutro ligeiro para cima), em µs ===
+int REFLEX_US = +30;  // ~1–2 mm
+
 // AHRS
 float att_roll = 0.0f, att_pitch = 0.0f; // graus
 const float AHRS_ALPHA = 0.98f;
@@ -38,13 +62,18 @@ uint64_t last_att_us = 0;
 
 // Timers
 uint64_t last_heartbeat_ms = 0;
-uint64_t last_mav_att_ms = 0;
+uint64_t last_mav_att_ms  = 0;
+uint64_t last_mav_rc_ms   = 0;
 const uint32_t HEARTBEAT_MS = 1000;
-const uint32_t ATT_SEND_MS = 50; // 20 Hz
+const uint32_t ATT_SEND_MS  = 50;  // 20 Hz
+const uint32_t RC_SEND_MS   = 50;  // 20 Hz 
+
+// Failsafe
+const uint32_t RX_TIMEOUT_MS = 200;
+uint32_t last_radio_ms = 0;
 
 // RC state
 int rc_us[8];
-uint32_t last_radio_ms = 0;
 
 // Params (saved)
 int g_rc_trim[8];
@@ -60,7 +89,15 @@ const uint8_t MAV_COMP_ID = 200;
 mavlink_message_t mav_msg;
 mavlink_status_t mav_status;
 
-// Helpers
+// === Helpers ===
+inline float mapByteToNorm(uint8_t b) { return ((int)b - 128) / 127.0f; }  // ~-1..+1
+inline int   normToUs(float x) {
+  if (x < -1) x = -1; if (x > +1) x = +1;
+  return (int)(1500 + x * 400); // ±400µs = throw moderado
+}
+inline float applyExpo(float v, float e) {
+  return v * (1.0f - e) + v * v * v * e;
+}
 inline int byteToUs(uint8_t v) { return 1000 + ((int)v * 1000) / 255; }
 
 void saveRcToNVS() {
@@ -166,33 +203,93 @@ void setup() {
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
 
-  // NRF24
+  // NRF24 — configuração idêntica ao 14-BRIZA
   if (!radio.begin()) {
     Serial.println("NRF24 não detectado!");
     while (1);
   }
-  radio.openReadingPipe(0, RADIO_ADDR);
   radio.setPALevel(RF24_PA_LOW);
+  radio.setDataRate(RF24_250KBPS);
+  radio.setChannel(76);
+  radio.setAutoAck(false);
+  radio.openReadingPipe(0, RADIO_ADDR);
   radio.startListening();
+
+  // Arma ESC com throttle baixo
+  for (int i = 0; i < 100; ++i) {
+    esc.writeMicroseconds(PWM_IDLE);
+    delay(10);
+  }
+
+  // Posição inicial dos servos (neutro + reflex)
+  srvL.writeMicroseconds(1500 + REFLEX_US);
+  srvR.writeMicroseconds(1500 + REFLEX_US);
 
   // Load params
   loadRcFromNVS();
+  last_radio_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
 void loop() {
   uint64_t now_us = esp_timer_get_time();
   uint64_t now_ms = now_us / 1000ULL;
 
-  // Leitura do rádio
-  if (radio.available()) {
+  // ========== Leitura do rádio ==========
+  bool got = false;
+  while (radio.available()) {
     radio.read(&pkt, sizeof(pkt));
+    got = true;
+  }
+  if (got) {
+    // Atualiza rc_us para MAVLink (mantém compatibilidade)
     for (int i = 0; i < 8; i++) {
       rc_us[i] = byteToUs(pkt.p[i]) + g_rc_trim[i];
     }
     last_radio_ms = now_ms;
   }
 
-  // AHRS (filtro complementar)
+  // ========== FAILSAFE ==========
+  if (!got && (now_ms - last_radio_ms > RX_TIMEOUT_MS)) {
+    esc.writeMicroseconds(PWM_IDLE);
+    srvL.writeMicroseconds(1500 + REFLEX_US);
+    srvR.writeMicroseconds(1500 + REFLEX_US);
+    // Continua enviando MAVLink/AHRS mesmo em failsafe
+  } else if (got) {
+    // ========== Controle dos servos (pipeline do 14-BRIZA) ==========
+
+    // Throttle: 0..255 → 1000..2000 (linear)
+    int pwm_thr = map(pkt.p[CH_THR], 0, 255, PWM_MIN, PWM_MAX);
+    pwm_thr = constrain(pwm_thr, PWM_MIN, PWM_MAX);
+
+    // Elevator/Aileron: byte → -1..+1 normalizado, com expo e ganhos
+    float E = mapByteToNorm(pkt.p[CH_ELE]);
+    float A = mapByteToNorm(pkt.p[CH_AIL]);
+    E = applyExpo(E, EXPO_E) * G_E;
+    A = applyExpo(A, EXPO_A) * G_A;
+
+    // Elevon mixing
+    float L = E - A;
+    float R = E + A;
+
+    // Diferencial (menos deflexão para baixo)
+    if (L < 0) L *= (1.0f - DIFF);
+    if (R < 0) R *= (1.0f - DIFF);
+
+    // Converte para µs + reflex + trim
+    int usL = normToUs(L) + REFLEX_US + g_servo_trim_l;
+    int usR = normToUs(R) + REFLEX_US + g_servo_trim_r;
+
+    // Satura 1000..2000
+    usL = constrain(usL, PWM_MIN, PWM_MAX);
+    usR = constrain(usR, PWM_MIN, PWM_MAX);
+
+    // Saídas
+    esc.writeMicroseconds(pwm_thr);
+    srvL.writeMicroseconds(usL);
+    srvR.writeMicroseconds(usR);
+  }
+
+  // ========== AHRS (filtro complementar) ==========
   if (now_us - last_att_us >= 20000) { // 50 Hz
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
@@ -202,10 +299,11 @@ void loop() {
     float acc_roll = atan2(a.acceleration.y, a.acceleration.z) * RAD2DEG;
     float acc_pitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * RAD2DEG;
 
-    att_roll = AHRS_ALPHA * (att_roll + g.gyro.x * dt) + (1 - AHRS_ALPHA) * acc_roll;
+    att_roll  = AHRS_ALPHA * (att_roll  + g.gyro.x * dt) + (1 - AHRS_ALPHA) * acc_roll;
     att_pitch = AHRS_ALPHA * (att_pitch + g.gyro.y * dt) + (1 - AHRS_ALPHA) * acc_pitch;
   }
 
+  // ========== MAVLink periódico ==========
   // Envia HEARTBEAT
   if (now_ms - last_heartbeat_ms >= HEARTBEAT_MS) {
     last_heartbeat_ms = now_ms;
@@ -218,8 +316,11 @@ void loop() {
     send_attitude();
   }
 
-  // Envia RC_CHANNELS_RAW
-  send_rc_channels_raw();
+  // Envia RC_CHANNELS_RAW (rate-limited a 20 Hz)
+  if (now_ms - last_mav_rc_ms >= RC_SEND_MS) {
+    last_mav_rc_ms = now_ms;
+    send_rc_channels_raw();
+  }
 
   // Processa mensagens MAVLink recebidas
   while (Serial2.available() > 0) {
@@ -230,13 +331,4 @@ void loop() {
       }
     }
   }
-
-  // Controle dos servos
-  int esc_out = rc_us[2];
-  int srvL_out = rc_us[0] + g_servo_trim_l;
-  int srvR_out = rc_us[1] + g_servo_trim_r;
-
-  esc.writeMicroseconds(esc_out);
-  srvL.writeMicroseconds(srvL_out);
-  srvR.writeMicroseconds(srvR_out);
 }
