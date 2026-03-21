@@ -1,0 +1,14 @@
+on: [push, pull_request]
+jobs:
+  compile-sketches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/compile-sketches@v1
+        with:
+          platforms: |
+            - name: rp2040:rp2040
+              source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          fqbn: rp2040:rp2040:rpipico:os=freertos
+
+# see https://forum.arduino.cc/t/example-of-core-log-level-using-compile-sketch-github-action/1036161
