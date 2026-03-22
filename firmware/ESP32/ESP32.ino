@@ -17,6 +17,11 @@
 #include <Adafruit_Sensor.h>
 #include <ESP32Servo.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_bt.h>
+// SBUS — UART invertida nativa do ESP32 (desativado, usando PWM individual)
+// #include "driver/uart.h"
 
 // [MAVLINK DESATIVADO] — Descomente para reativar
 // #include "mavlink/common/mavlink.h"
@@ -28,12 +33,15 @@ const uint8_t PIN_NRF_CE  = 4;
 const uint8_t PIN_NRF_CSN = 5;
 const uint8_t PIN_MPU_SDA = 21;
 const uint8_t PIN_MPU_SCL = 22;
-const uint8_t PIN_ESC     = 12;
-const uint8_t PIN_SERVO_L = 13;
-const uint8_t PIN_SERVO_R = 14;
-const uint8_t PIN_AUX1    = 27;   // canal auxiliar 1 (p[4])
-const uint8_t PIN_AUX2    = 26;   // canal auxiliar 2 (p[5])
-const uint8_t PIN_AUX3    = 25;   // canal auxiliar 3 (p[6])
+// Saídas PWM — 8 canais
+const uint8_t PIN_CH1 = 12;   // CH1 = Roll/Aileron
+const uint8_t PIN_CH2 = 13;   // CH2 = Pitch/Elevator
+const uint8_t PIN_CH3 = 14;   // CH3 = Throttle
+const uint8_t PIN_CH4 = 27;   // CH4 = Yaw/Rudder
+const uint8_t PIN_CH5 = 26;   // CH5 = Aux1
+const uint8_t PIN_CH6 = 25;   // CH6 = Aux2
+const uint8_t PIN_CH7 = 16;   // CH7 = Aux3
+const uint8_t PIN_CH8 = 17;   // CH8 = Aux4
 
 // =========================================================================
 // === OBJETOS ===
@@ -41,7 +49,7 @@ const uint8_t PIN_AUX3    = 25;   // canal auxiliar 3 (p[6])
 RF24 radio(PIN_NRF_CE, PIN_NRF_CSN);
 Adafruit_MPU6050 mpu;
 Preferences preferences;
-Servo esc, srvL, srvR, aux1, aux2, aux3;
+Servo ch1, ch2, ch3, ch4, ch5, ch6, ch7, ch8;
 
 // =========================================================================
 // === RÁDIO ===
@@ -53,13 +61,15 @@ struct __attribute__((packed)) Packet {
 } pkt;
 const byte RADIO_ADDR[6] = "00001";
 
-// Mapeamento de canais (igual 14-BRIZA e TX_NANO)
-const uint8_t CH_THR  = 0;    // throttle
-const uint8_t CH_ELE  = 3;    // pitch (elevator)
-const uint8_t CH_AIL  = 2;    // roll  (aileron)
-const uint8_t CH_AUX1 = 4;    // auxiliar 1 → GPIO 27
-const uint8_t CH_AUX2 = 5;    // auxiliar 2 → GPIO 26
-const uint8_t CH_AUX3 = 6;    // auxiliar 3 → GPIO 25
+// Mapeamento: índice no pacote do TX → canal ArduPilot
+const uint8_t CH_AIL  = 2;    // p[2] → CH1 Roll/Aileron
+const uint8_t CH_ELE  = 3;    // p[3] → CH2 Pitch/Elevator
+const uint8_t CH_THR  = 0;    // p[0] → CH3 Throttle
+const uint8_t CH_RUD  = 1;    // p[1] → CH4 Yaw/Rudder
+const uint8_t CH_AUX1 = 4;    // p[4] → CH5 Aux1
+const uint8_t CH_AUX2 = 5;    // p[5] → CH6 Aux2
+const uint8_t CH_AUX3 = 6;    // p[6] → CH7 Aux3
+const uint8_t CH_AUX4 = 7;    // p[7] → CH8 Aux4
 
 // =========================================================================
 // === CONFIGURAÇÕES DE VOO ===
@@ -106,6 +116,11 @@ float gyro_pitch_offset = 0.0f;
 uint32_t last_radio_ms = 0;
 bool manual_mode = true;           // começa em manual por segurança
 
+// Comandos do piloto (atualizados quando chega pacote novo)
+float cmd_E = 0.0f;                // elevator normalizado com expo (-1..+1)
+float cmd_A = 0.0f;                // aileron  normalizado com expo (-1..+1)
+int   cmd_thr_us = PWM_IDLE;       // throttle em µs
+
 // RC state (para telemetria/debug)
 int rc_us[8];
 
@@ -114,6 +129,7 @@ int g_rc_trim[8];
 int g_servo_trim_l = 0;
 int g_servo_trim_r = 0;
 float g_deadzone = 0.05f;
+
 
 // [MAVLINK] — desativado
 // const uint8_t MAV_SYS_ID = 1;
@@ -180,6 +196,7 @@ void calibrateGyro() {
   Serial.printf("Gyro offsets: roll=%.2f pitch=%.2f\n", gyro_roll_offset, gyro_pitch_offset);
 }
 
+
 /* =========================================================================
  * [MAVLINK DESATIVADO] — Todas as funções MAVLink comentadas.
  * Descomente este bloco para reativar integração com Ardupilot/GCS.
@@ -239,47 +256,47 @@ void handle_param_set(const mavlink_message_t &msg) {
 // === SETUP ===
 // =========================================================================
 void setup() {
+  // Desliga WiFi e Bluetooth para economizar energia (~80mA)
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+
   Serial.begin(115200);
   delay(100);
   Serial.println("ESP32 RX + Estabilizador - Inicializando");
 
-  // [MAVLINK] Serial2 — desativado
-  // Serial2.begin(115200, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
-
-  // Servos / ESC (6 canais PWM)
+  // Saídas PWM — 8 canais para ArduPilot
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
-  esc.setPeriodHertz(50);
-  srvL.setPeriodHertz(50);
-  srvR.setPeriodHertz(50);
-  aux1.setPeriodHertz(50);
-  aux2.setPeriodHertz(50);
-  aux3.setPeriodHertz(50);
-  esc.attach(PIN_ESC, PWM_MIN, PWM_MAX);
-  srvL.attach(PIN_SERVO_L, PWM_MIN, PWM_MAX);
-  srvR.attach(PIN_SERVO_R, PWM_MIN, PWM_MAX);
-  aux1.attach(PIN_AUX1, PWM_MIN, PWM_MAX);
-  aux2.attach(PIN_AUX2, PWM_MIN, PWM_MAX);
-  aux3.attach(PIN_AUX3, PWM_MIN, PWM_MAX);
 
-  // Arma ESC com throttle baixo
-  for (int i = 0; i < 100; ++i) {
-    esc.writeMicroseconds(PWM_IDLE);
-    delay(10);
+  // Attach com verificação — se falhar, aparece no Serial Monitor
+  Servo* servos[] = {&ch1, &ch2, &ch3, &ch4, &ch5, &ch6, &ch7, &ch8};
+  uint8_t pins[]  = {PIN_CH1, PIN_CH2, PIN_CH3, PIN_CH4, PIN_CH5, PIN_CH6, PIN_CH7, PIN_CH8};
+  for (int i = 0; i < 8; i++) {
+    servos[i]->setPeriodHertz(50);
+    int result = servos[i]->attach(pins[i], PWM_MIN, PWM_MAX);
+    if (result == 0) {
+      Serial.printf("ERRO: CH%d (GPIO %d) falhou no attach!\n", i+1, pins[i]);
+    } else {
+      Serial.printf("OK: CH%d (GPIO %d) attached\n", i+1, pins[i]);
+    }
   }
 
-  // Posição inicial dos servos (neutro + reflex)
-  srvL.writeMicroseconds(1500 + REFLEX_US);
-  srvR.writeMicroseconds(1500 + REFLEX_US);
-  aux1.writeMicroseconds(1500);
-  aux2.writeMicroseconds(1500);
-  aux3.writeMicroseconds(1500);
+  // Posição inicial: neutro (1500) e throttle idle (1000)
+  ch1.writeMicroseconds(1500);
+  ch2.writeMicroseconds(1500);
+  ch3.writeMicroseconds(PWM_IDLE);
+  ch4.writeMicroseconds(1500);
+  ch5.writeMicroseconds(1500);
+  ch6.writeMicroseconds(1500);
+  ch7.writeMicroseconds(1500);
+  ch8.writeMicroseconds(1500);
 
   // MPU6050 — NÃO BLOQUEANTE (continua como RX puro se falhar)
   Wire.begin(PIN_MPU_SDA, PIN_MPU_SCL);
-  Wire.setTimeOut(10); // timeout I2C de 10ms para evitar travamentos
+  Wire.setTimeOut(50); // timeout I2C de 50ms para evitar travamentos
   if (mpu.begin()) {
     mpu_ok = true;
     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
@@ -335,99 +352,43 @@ void loop() {
       rc_us[i] = byteToUs(pkt.p[i]) + g_rc_trim[i];
     }
 
+    // Atualiza comandos do piloto
+    cmd_thr_us = constrain(map(pkt.p[CH_THR], 0, 255, PWM_MIN, PWM_MAX), PWM_MIN, PWM_MAX);
+    cmd_E = applyExpo(mapByteToNorm(pkt.p[CH_ELE]), EXPO_E);
+    cmd_A = applyExpo(mapByteToNorm(pkt.p[CH_AIL]), EXPO_A);
+
     // Switch s1: modo de voo (0=manual, 1=estabilizado)
     manual_mode = (pkt.s1 == 0);
   }
 
   // ========== 2. FAILSAFE ==========
   if (now_ms - last_radio_ms > RX_TIMEOUT_MS) {
-    esc.writeMicroseconds(PWM_IDLE);
-    srvL.writeMicroseconds(1500 + REFLEX_US);
-    srvR.writeMicroseconds(1500 + REFLEX_US);
-    aux1.writeMicroseconds(1500);
-    aux2.writeMicroseconds(1500);
-    aux3.writeMicroseconds(1500);
-    return; // sai do loop, não processa nada
+    ch1.writeMicroseconds(1500);
+    ch2.writeMicroseconds(1500);
+    ch3.writeMicroseconds(PWM_IDLE);
+    ch4.writeMicroseconds(1500);
+    ch5.writeMicroseconds(1500);
+    ch6.writeMicroseconds(1500);
+    ch7.writeMicroseconds(1500);
+    ch8.writeMicroseconds(1500);
+    return;
   }
 
-  // ========== 3. LEITURA DO MPU (se disponível) ==========
-  float gyro_roll_dps  = 0.0f;
-  float gyro_pitch_dps = 0.0f;
-
+  // ========== 3. LEITURA DO MPU (para uso futuro / telemetria) ==========
   if (mpu_ok) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
-    // MPU montado com X=horizontal, Y=vertical → Z=frente
-    gyro_roll_dps  = (g.gyro.z * RAD2DEG) - gyro_roll_offset;   // roll = eixo Z (frente)
-    gyro_pitch_dps = (g.gyro.x * RAD2DEG) - gyro_pitch_offset;  // pitch = eixo X (lateral)
+    att_roll  = (g.gyro.z * RAD2DEG) - gyro_roll_offset;
+    att_pitch = (g.gyro.x * RAD2DEG) - gyro_pitch_offset;
   }
 
-  // ========== 4. CONTROLE DOS SERVOS ==========
-  if (!got) return; // sem pacote novo, mantém último estado
-
-  // Throttle: 0..255 → 1000..2000
-  int pwm_thr = map(pkt.p[CH_THR], 0, 255, PWM_MIN, PWM_MAX);
-  pwm_thr = constrain(pwm_thr, PWM_MIN, PWM_MAX);
-
-  // Sticks normalizados com expo
-  float E = applyExpo(mapByteToNorm(pkt.p[CH_ELE]), EXPO_E);
-  float A = applyExpo(mapByteToNorm(pkt.p[CH_AIL]), EXPO_A);
-
-  int usL, usR;
-
-  if (manual_mode || !mpu_ok) {
-    // ===== MODO MANUAL (elevon mixing puro, como 14-BRIZA) =====
-    float eCmd = E * G_E;
-    float aCmd = A * G_A;
-
-    float L = eCmd - aCmd;
-    float R = eCmd + aCmd;
-
-    // Diferencial
-    if (L < 0) L *= (1.0f - DIFF);
-    if (R < 0) R *= (1.0f - DIFF);
-
-    usL = normToUs(L) + REFLEX_US + g_servo_trim_l;
-    usR = normToUs(R) + REFLEX_US + g_servo_trim_r;
-
-  } else {
-    // ===== MODO ESTABILIZADO (rate-mode com gyro) =====
-    // O stick comanda uma taxa desejada (°/s)
-    // O gyro mede a taxa real
-    // A correção é: erro = desejado - medido
-    float desired_roll  = A * MAX_RATE_DPS;   // stick → taxa desejada
-    float desired_pitch = E * MAX_RATE_DPS;
-
-    float error_roll  = desired_roll  - gyro_roll_dps;
-    float error_pitch = desired_pitch - gyro_pitch_dps;
-
-    // Correção proporcional (P-controller)
-    float corr_roll  = error_roll  * STAB_GAIN_ROLL;
-    float corr_pitch = error_pitch * STAB_GAIN_PITCH;
-
-    // Elevon mixing com correção
-    float L = -corr_pitch + corr_roll;
-    float R = -corr_pitch - corr_roll;
-
-    // Diferencial
-    if (L < 0) L *= (1.0f - DIFF);
-    if (R < 0) R *= (1.0f - DIFF);
-
-    usL = constrain(1500 + (int)L + REFLEX_US + g_servo_trim_l, PWM_MIN, PWM_MAX);
-    usR = constrain(1500 + (int)R + REFLEX_US + g_servo_trim_r, PWM_MIN, PWM_MAX);
-  }
-
-  // Satura 1000..2000
-  usL = constrain(usL, PWM_MIN, PWM_MAX);
-  usR = constrain(usR, PWM_MIN, PWM_MAX);
-
-  // Saídas — elevon + ESC
-  esc.writeMicroseconds(pwm_thr);
-  srvL.writeMicroseconds(usL);
-  srvR.writeMicroseconds(usR);
-
-  // Saídas — canais auxiliares (passthrough direto do pacote)
-  aux1.writeMicroseconds(byteToUs(pkt.p[CH_AUX1]));
-  aux2.writeMicroseconds(byteToUs(pkt.p[CH_AUX2]));
-  aux3.writeMicroseconds(byteToUs(pkt.p[CH_AUX3]));
+  // ========== 4. SAÍDAS PWM — 8 CANAIS RAW ==========
+  ch1.writeMicroseconds(rc_us[CH_AIL]);   // CH1 = Roll/Aileron
+  ch2.writeMicroseconds(rc_us[CH_ELE]);   // CH2 = Pitch/Elevator
+  ch3.writeMicroseconds(rc_us[CH_THR]);   // CH3 = Throttle
+  ch4.writeMicroseconds(rc_us[CH_RUD]);   // CH4 = Yaw/Rudder
+  ch5.writeMicroseconds(rc_us[CH_AUX1]);  // CH5 = Aux1
+  ch6.writeMicroseconds(rc_us[CH_AUX2]);  // CH6 = Aux2
+  ch7.writeMicroseconds(rc_us[CH_AUX3]);  // CH7 = Aux3
+  ch8.writeMicroseconds(rc_us[CH_AUX4]);  // CH8 = Aux4
 }
