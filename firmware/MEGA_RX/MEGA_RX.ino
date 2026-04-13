@@ -1,5 +1,4 @@
-// === MEGA 2560 — Recebe 8+2 canais via Serial1 e envia CSV para o PC ===
-// Protocolo: 0xAA 0x55 [p0..p7] [s1] [s2] [chkXOR de p0..s2]
+// === MEGA 2560 — Lê 8 canais PWM (pinos 2..9) e envia CSV para o PC ===
 
 struct Frame {
   uint8_t p[8];
@@ -7,51 +6,52 @@ struct Frame {
   uint8_t s2;
 } f;
 
-enum { ST_AA, ST_55, ST_PAY, ST_CHK } st = ST_AA;
-uint8_t buf[10];  // p0..p7(8) + s1 + s2 = 10
-uint8_t idx = 0;
+const uint8_t PWM_PINS[8] = {2, 3, 4, 5, 6, 7, 8, 9};
+const unsigned long PWM_TIMEOUT_US = 25000UL;
+const uint8_t PWM_MIN_US = 1000;
+const uint8_t PWM_MAX_US = 2000;
+const unsigned long PRINT_PERIOD_MS = 20;
 
-bool readFrame() {
-  while (Serial1.available()) {
-    uint8_t b = Serial1.read();
-    switch (st) {
-      case ST_AA: if (b == 0xAA) st = ST_55; break;
-      case ST_55: st = (b == 0x55) ? ST_PAY : ST_AA; break;
-      case ST_PAY:
-        buf[idx++] = b;
-        if (idx == 10) st = ST_CHK;
-        break;
-      case ST_CHK: {
-        uint8_t chk = 0; for (uint8_t i = 0; i < 10; i++) chk ^= buf[i];
-        bool ok = (chk == b);
-        st = ST_AA;
-        if (ok) {
-          for (uint8_t i = 0; i < 8; i++) f.p[i] = buf[i];
-          f.s1 = buf[8]; f.s2 = buf[9];
-          idx = 0;
-          return true;
-        } else {
-          idx = 0; // descarta e ressincroniza
-        }
-      } break;
-    }
+uint8_t readPwmAsByte(uint8_t pin, uint8_t fallback) {
+  unsigned long pulse = pulseIn(pin, HIGH, PWM_TIMEOUT_US);
+  if (pulse < 900 || pulse > 2200) return fallback;
+  long mapped = map((long)pulse, PWM_MIN_US, PWM_MAX_US, 0, 255);
+  if (mapped < 0) mapped = 0;
+  if (mapped > 255) mapped = 255;
+  return (uint8_t)mapped;
+}
+
+void readPwmInputs() {
+  for (uint8_t i = 0; i < 8; i++) {
+    f.p[i] = readPwmAsByte(PWM_PINS[i], f.p[i]);
   }
-  return false;
+  // Mantém o mesmo CSV esperado no PC: p0..p7,s1,s2
+  // s1 e s2 são derivados dos dois últimos canais.
+  f.s1 = (f.p[6] >= 128) ? 255 : 0;
+  f.s2 = (f.p[7] >= 128) ? 255 : 0;
 }
 
 void setup() {
-  Serial.begin(115200);   // USB -> PC (CSV)
-  Serial1.begin(115200);  // Link com o Nano RX
-  Serial.println(F("# MEGA pronto: aguardando frames 8+2 via Serial1..."));
+  Serial.begin(115200);  // USB -> PC (CSV)
+  for (uint8_t i = 0; i < 8; i++) {
+    pinMode(PWM_PINS[i], INPUT);
+    f.p[i] = 127;
+  }
+  f.s1 = 0;
+  f.s2 = 0;
+  Serial.println(F("# MEGA pronto: lendo PWM nos pinos 2..9..."));
 }
 
 void loop() {
-  if (readFrame()) {
-    // CSV p0..p7,s1,s2  (p em 0..255; switches 0/1 -> 0/255)
+  static unsigned long lastPrint = 0;
+  readPwmInputs();
+
+  if (millis() - lastPrint >= PRINT_PERIOD_MS) {
+    lastPrint = millis();
     Serial.print(f.p[0]);
     for (int i = 1; i < 8; i++) { Serial.print(','); Serial.print(f.p[i]); }
-    Serial.print(','); Serial.print(f.s1 ? 255 : 0);
-    Serial.print(','); Serial.print(f.s2 ? 255 : 0);
+    Serial.print(','); Serial.print(f.s1);
+    Serial.print(','); Serial.print(f.s2);
     Serial.println();
   }
 }
