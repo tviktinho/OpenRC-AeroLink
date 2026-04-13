@@ -10,11 +10,13 @@ const uint8_t PWM_PINS[8] = {2, 3, 4, 5, 6, 7, 8, 9};
 const unsigned long PWM_TIMEOUT_US = 3000UL;
 const uint16_t PWM_MIN_US = 1000;
 const uint16_t PWM_MAX_US = 2000;
+const uint16_t PWM_VALID_MIN_US = 900;
+const uint16_t PWM_VALID_MAX_US = 2200;
 const unsigned long PRINT_PERIOD_MS = 20;
 
 uint8_t readPwmAsByte(uint8_t pin, uint8_t fallback) {
   unsigned long pulse = pulseIn(pin, HIGH, PWM_TIMEOUT_US);
-  if (pulse < 900 || pulse > 2200) return fallback;
+  if (pulse < PWM_VALID_MIN_US || pulse > PWM_VALID_MAX_US) return fallback;
   long mapped = map((long)pulse, PWM_MIN_US, PWM_MAX_US, 0, 255);
   if (mapped < 0) mapped = 0;
   if (mapped > 255) mapped = 255;
@@ -22,12 +24,12 @@ uint8_t readPwmAsByte(uint8_t pin, uint8_t fallback) {
 }
 
 void readPwmInputs() {
-  static uint8_t ch = 0;
-  f.p[ch] = readPwmAsByte(PWM_PINS[ch], f.p[ch]);
-  ch = (ch + 1) & 0x07;
+  for (uint8_t i = 0; i < 8; i++) {
+    f.p[i] = readPwmAsByte(PWM_PINS[i], f.p[i]);
+  }
 
   // Mantém o mesmo CSV esperado no PC: p0..p7,s1,s2
-  // s1/s2 são limiares dos canais 7 e 8 (índices 6 e 7), preservando
+  // s1/s2 são limiares dos canais 6 e 7 (índices 6 e 7), preservando
   // compatibilidade com o software PC que espera dois switches separados.
   f.s1 = (f.p[6] >= 128) ? 255 : 0;
   f.s2 = (f.p[7] >= 128) ? 255 : 0;
