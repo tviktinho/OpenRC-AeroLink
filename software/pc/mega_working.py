@@ -41,6 +41,28 @@ AXIS_ORDER = [
 
 INVERT = [False]*8
 
+
+def parse_serial_payload(line: str):
+    parts = line.split(',')
+    if len(parts) not in (8, 10):
+        return None
+
+    try:
+        vals = [int(x) for x in parts]
+    except ValueError:
+        return None
+
+    pots = vals[:8]
+    if len(vals) == 10:
+        s1_raw, s2_raw = vals[8], vals[9]
+        has_switches = True
+    else:
+        s1_raw = 0
+        s2_raw = 0
+        has_switches = False
+
+    return pots, s1_raw, s2_raw, has_switches
+
 def to_vjoy(val_255: int, invert=False) -> int:
     if val_255 < 0:   val_255 = 0
     if val_255 > 255: val_255 = 255
@@ -76,7 +98,7 @@ def main():
     last_s1_on = None
     last_s2_on = None
 
-    print(f">> Eixos: p0..p7  |  Switches -> vJoy(btn hold) + teclas")
+    print(f">> Eixos: p0..p7  |  Switches opcionais -> vJoy(btn hold) + teclas")
     print(f"   s1: ON->{SW1_ON_KEY} OFF->{SW1_OFF_KEY}  |  vJoy Btn {BTN_S1}")
     print(f"   s2: ON->{SW2_ON_KEY} OFF->{SW2_OFF_KEY}  |  vJoy Btn {BTN_S2}")
 
@@ -95,17 +117,11 @@ def main():
                     j.update()
                 continue
 
-            parts = line.split(',')
-            if len(parts) != 10:
+            parsed = parse_serial_payload(line)
+            if parsed is None:
                 continue
 
-            try:
-                vals = [int(x) for x in parts]
-            except ValueError:
-                continue
-
-            pots = vals[:8]
-            s1_raw, s2_raw = vals[8], vals[9]
+            pots, s1_raw, s2_raw, has_switches = parsed
             s1_on = 1 if s1_raw >= ON_THRESHOLD else 0
             s2_on = 1 if s2_raw >= ON_THRESHOLD else 0
 
@@ -125,11 +141,11 @@ def main():
             last_ok = now
 
             # ---- TECLAS nas transições (edge-trigger) ----
-            if last_s1_on is None or s1_on != last_s1_on:
+            if has_switches and (last_s1_on is None or s1_on != last_s1_on):
                 tap_key(SW1_ON_KEY if s1_on else SW1_OFF_KEY)
                 last_s1_on = s1_on
 
-            if last_s2_on is None or s2_on != last_s2_on:
+            if has_switches and (last_s2_on is None or s2_on != last_s2_on):
                 tap_key(SW2_ON_KEY if s2_on else SW2_OFF_KEY)
                 last_s2_on = s2_on
 

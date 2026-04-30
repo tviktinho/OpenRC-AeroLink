@@ -42,6 +42,28 @@ def to_vjoy(val_255: int, deadzone_255: int = 1, invert: bool = False) -> int:
     return max(1, min(32767, out))
 
 
+def parse_serial_payload(line: str):
+    parts = line.split(",")
+    if len(parts) not in (8, 10):
+        return None
+
+    try:
+        vals = [int(x) for x in parts]
+    except ValueError:
+        return None
+
+    pots = vals[:8]
+    if len(vals) == 10:
+        s1_raw, s2_raw = vals[8], vals[9]
+        has_switches = True
+    else:
+        s1_raw = 0
+        s2_raw = 0
+        has_switches = False
+
+    return pots, s1_raw, s2_raw, has_switches
+
+
 class BridgeWorker:
     """
     Background worker that reads serial data, feeds vJoy axes and emits key presses on switch edges.
@@ -175,20 +197,14 @@ class BridgeWorker:
                 except Exception:
                     continue
 
-                parts = line.split(",")
-                if len(parts) != 10:
+                parsed = parse_serial_payload(line)
+                if parsed is None:
                     if dbg_bad_lines < 3 and line:
                         self.log(f"[INFO] Linha ignorada: '{line}'")
                         dbg_bad_lines += 1
                     continue
 
-                try:
-                    vals = [int(x) for x in parts]
-                except ValueError:
-                    continue
-
-                pots = vals[:8]
-                s1_raw, s2_raw = vals[8], vals[9]
+                pots, s1_raw, s2_raw, has_switches = parsed
                 s1_on = 1 if s1_raw >= self.on_threshold else 0
                 s2_on = 1 if s2_raw >= self.on_threshold else 0
 
@@ -215,11 +231,11 @@ class BridgeWorker:
                 last_ok = now
 
                 # Edge-triggered key taps
-                if last_s1_on is None or s1_on != last_s1_on:
+                if has_switches and (last_s1_on is None or s1_on != last_s1_on):
                     self._tap_key(self.sw1_key)
                     last_s1_on = s1_on
 
-                if last_s2_on is None or s2_on != last_s2_on:
+                if has_switches and (last_s2_on is None or s2_on != last_s2_on):
                     self._tap_key(self.sw2_key)
                     last_s2_on = s2_on
 
