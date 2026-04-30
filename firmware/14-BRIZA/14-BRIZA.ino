@@ -13,7 +13,7 @@ RF24 radio(CE_PIN, CSN_PIN);
 struct PacketRF { uint8_t p[8]; uint8_t s1; uint8_t s2; } pkt;
 
 // === Pinos ===
-const uint8_t PIN_ESC   = 9;  // sinal do ESC
+const uint8_t PIN_ESC   = 3;  // sinal do ESC
 const uint8_t PIN_SERVO_L = 5;
 const uint8_t PIN_SERVO_R = 6;
 
@@ -30,8 +30,8 @@ const int PWM_MAX = 2000;     // us
 const int PWM_IDLE = 1000;    // motor cortado
 
 // Throws (ganhos) para elevon
-float G_E = 2.55;   // ganho de pitch
-float G_A = 2.55;   // ganho de roll
+float G_E = 1;   // ganho de pitch
+float G_A = 1;   // ganho de roll
 
 // Expo (0..0.6 aprox)
 float EXPO_E = 0.25;

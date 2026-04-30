@@ -1,46 +1,27 @@
-# MEGA_RX — Receptor Compatível
+# MEGA_RX
 
-Firmware para Arduino MEGA usado como receptor.
+Firmware para Arduino Mega 2560 usado como ponte de um receptor RC PWM para o PC.
 
-## Funções
-- Recebe pacotes via **nRF24L01**.
-- Gera saídas **PWM** para servos/ESC.
-- Pode atuar como **ponte para simulador PC** (via Serial).
-- Implementa **failsafe** básico.
+## Fluxo atual
+- O Mega le 8 canais PWM diretamente nos pinos `A8` ate `A15`.
+- Cada largura de pulso e convertida de `1000..2000 us` para `0..255`.
+- O Mega envia uma linha CSV pela USB com `p0,p1,p2,p3,p4,p5,p6,p7`.
+
+## Importante
+- Receptor comercial de radio controle nao entrega sinal analogico continuo.
+- A leitura correta e por largura de pulso PWM.
+- Ligue o `GND` do receptor no `GND` do Mega.
 
 ## Pinagem
-- **nRF24L01:** CE/CSN + SPI.
-- **PWM:** 6 pinos digitais configurados com Servo.
-- **UART PC:** porta USB do MEGA.
+- `A8` -> canal 1
+- `A9` -> canal 2
+- `A10` -> canal 3
+- `A11` -> canal 4
+- `A12` -> canal 5
+- `A13` -> canal 6
+- `A14` -> canal 7
+- `A15` -> canal 8
 
-## Bibliotecas
-- RF24
-- Servo
-
-## Observações
-- Útil quando ESP32 não está disponível.
-
-# MEGA_SIM — Simulador (vJoy + Python)
-
-Firmware + software para usar o controle em simuladores no PC.
-
-## Funções
-- Arduino MEGA atua como **gateway Serial**.
-- Script Python (`mega_joystick.py`) converte sinais em entradas de joystick (vJoy).
-- Switches podem atuar como botões e teclas do teclado.
-
-## Fluxo
-[ TX ] → Rádio → [ RX ] → Serial → [ MEGA_SIM ] → USB → [ PC (Python + vJoy) ]
-
-## Requisitos no PC
-- Python 3.12+
-- Bibliotecas: `pyserial`, `pyvjoy`, `keyboard`
-- vJoy driver instalado
-
-## Script
-- `mega_joystick.py` faz mapeamento 0–255 → 1–32767.
-- Switches tratados com **cache de estado** (evita pulsos curtos).
-
-## Observações
-- Ajustar porta COM no script.
-- Testar teclas e botões separadamente antes de usar nos simuladores.
+## Ajuste fino
+- Se algum canal nao estiver chegando perto dos extremos, ajuste `CHANNEL_MIN_US` e `CHANNEL_MAX_US` em `MEGA_RX.ino`.
+- Se algum eixo estiver invertido, ajuste `CHANNEL_INVERT`.

@@ -1,57 +1,124 @@
-// === MEGA 2560 — Recebe 8+2 canais via Serial1 e envia CSV para o PC ===
-// Protocolo: 0xAA 0x55 [p0..p7] [s1] [s2] [chkXOR de p0..s2]
+#include <avr/interrupt.h>
 
-struct Frame {
-  uint8_t p[8];
-  uint8_t s1;
-  uint8_t s2;
-} f;
+// === MEGA 2560 — Lê 8 canais PWM do receptor e envia CSV para o PC ===
+// Receptor RC comercial (ex.: Turnigy 9X) entrega pulsos de servo, não tensão analógica.
+// Entradas usadas: A8..A15 (PORTK / PCINT16..23)
+// Saída USB: p0,p1,p2,p3,p4,p5,p6,p7 (cada canal em 0..255)
 
-enum { ST_AA, ST_55, ST_PAY, ST_CHK } st = ST_AA;
-uint8_t buf[10];  // p0..p7(8) + s1 + s2 = 10
-uint8_t idx = 0;
+const uint8_t CHANNEL_PINS[8] = {A8, A9, A10, A11, A12, A13, A14, A15};
+const uint16_t SAMPLE_PERIOD_MS = 10;      // ~100 Hz para o PC
+const uint16_t VALID_MIN_US = 750;         // rejeita ruído fora da faixa RC
+const uint16_t VALID_MAX_US = 2250;
+const uint32_t SIGNAL_TIMEOUT_US = 100000; // 100 ms sem pulso = canal inválido
 
-bool readFrame() {
-  while (Serial1.available()) {
-    uint8_t b = Serial1.read();
-    switch (st) {
-      case ST_AA: if (b == 0xAA) st = ST_55; break;
-      case ST_55: st = (b == 0x55) ? ST_PAY : ST_AA; break;
-      case ST_PAY:
-        buf[idx++] = b;
-        if (idx == 10) st = ST_CHK;
-        break;
-      case ST_CHK: {
-        uint8_t chk = 0; for (uint8_t i = 0; i < 10; i++) chk ^= buf[i];
-        bool ok = (chk == b);
-        st = ST_AA;
-        if (ok) {
-          for (uint8_t i = 0; i < 8; i++) f.p[i] = buf[i];
-          f.s1 = buf[8]; f.s2 = buf[9];
-          idx = 0;
-          return true;
-        } else {
-          idx = 0; // descarta e ressincroniza
-        }
-      } break;
+// Ajuste aqui se algum canal do seu receptor não estiver chegando perto de 1000/2000 us.
+const uint16_t CHANNEL_MIN_US[8] = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+const uint16_t CHANNEL_MAX_US[8] = {2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000};
+const bool CHANNEL_INVERT[8] = {false, false, false, false, false, false, false, false};
+
+volatile uint32_t riseTimeUs[8] = {0};
+volatile uint16_t pulseWidthUs[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
+volatile uint32_t lastPulseUs[8] = {0};
+volatile uint8_t lastPortKState = 0;
+
+uint8_t channels[8];
+
+static inline uint8_t pulseUsToByte(uint8_t ch, uint16_t pulseUs) {
+  uint16_t minUs = CHANNEL_MIN_US[ch];
+  uint16_t maxUs = CHANNEL_MAX_US[ch];
+
+  if (maxUs <= minUs) {
+    maxUs = minUs + 1;
+  }
+
+  if (pulseUs < minUs) pulseUs = minUs;
+  if (pulseUs > maxUs) pulseUs = maxUs;
+
+  uint32_t scaled = (uint32_t)(pulseUs - minUs) * 255UL;
+  uint8_t out = (uint8_t)((scaled + ((maxUs - minUs) / 2)) / (maxUs - minUs));
+
+  if (CHANNEL_INVERT[ch]) {
+    out = 255 - out;
+  }
+
+  return out;
+}
+
+void setupPwmCapture() {
+  for (uint8_t i = 0; i < 8; i++) {
+    pinMode(CHANNEL_PINS[i], INPUT);
+  }
+
+  lastPortKState = PINK;
+
+  PCICR |= _BV(PCIE2);   // habilita pin-change para PORTK
+  PCMSK2 = 0xFF;         // monitora PK0..PK7 (A8..A15)
+  PCIFR |= _BV(PCIF2);   // limpa flag pendente
+}
+
+ISR(PCINT2_vect) {
+  const uint8_t currentState = PINK;
+  const uint8_t changed = currentState ^ lastPortKState;
+  const uint32_t nowUs = micros();
+
+  for (uint8_t i = 0; i < 8; i++) {
+    const uint8_t mask = (1 << i);
+    if ((changed & mask) == 0) {
+      continue;
+    }
+
+    if ((currentState & mask) != 0) {
+      riseTimeUs[i] = nowUs;
+      continue;
+    }
+
+    const uint32_t width = nowUs - riseTimeUs[i];
+    if (width >= VALID_MIN_US && width <= VALID_MAX_US) {
+      pulseWidthUs[i] = (uint16_t)width;
+      lastPulseUs[i] = nowUs;
     }
   }
-  return false;
+
+  lastPortKState = currentState;
 }
 
 void setup() {
-  Serial.begin(115200);   // USB -> PC (CSV)
-  Serial1.begin(115200);  // Link com o Nano RX
-  Serial.println(F("# MEGA pronto: aguardando frames 8+2 via Serial1..."));
+  Serial.begin(115200);
+  setupPwmCapture();
 }
 
 void loop() {
-  if (readFrame()) {
-    // CSV p0..p7,s1,s2  (p em 0..255; switches 0/1 -> 0/255)
-    Serial.print(f.p[0]);
-    for (int i = 1; i < 8; i++) { Serial.print(','); Serial.print(f.p[i]); }
-    Serial.print(','); Serial.print(f.s1 ? 255 : 0);
-    Serial.print(','); Serial.print(f.s2 ? 255 : 0);
-    Serial.println();
+  static uint32_t lastSampleMs = 0;
+  const uint32_t nowMs = millis();
+  const uint32_t nowUs = micros();
+
+  if (nowMs - lastSampleMs < SAMPLE_PERIOD_MS) {
+    return;
   }
+  lastSampleMs = nowMs;
+
+  uint16_t pulseCopy[8];
+  uint32_t lastCopy[8];
+
+  noInterrupts();
+  for (uint8_t i = 0; i < 8; i++) {
+    pulseCopy[i] = pulseWidthUs[i];
+    lastCopy[i] = lastPulseUs[i];
+  }
+  interrupts();
+
+  for (uint8_t i = 0; i < 8; i++) {
+    if ((nowUs - lastCopy[i]) > SIGNAL_TIMEOUT_US) {
+      channels[i] = 127;
+    } else {
+      channels[i] = pulseUsToByte(i, pulseCopy[i]);
+    }
+  }
+
+  Serial.print(channels[0]);
+  for (uint8_t i = 1; i < 8; i++) {
+    Serial.print(',');
+    Serial.print(channels[i]);
+  }
+  Serial.println();
 }
