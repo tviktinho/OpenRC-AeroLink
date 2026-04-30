@@ -1,21 +1,31 @@
-# NANO_RX — Receptor (Legado)
+# NANO_RX_v2.0
 
-Versão inicial de RX usada na Etapa 2 do projeto.
+Firmware atualizado do receptor utilizando Arduino Nano e módulo nRF24L01.
 
-## Funções
-- Recebe pacotes via **nRF24L01**.
-- Reconstrói 8 eixos + switches.
-- Saída para:
-  - **PWM** (servos/ESC) ou
-  - **PPM-SUM** (sinal único).
-- Failsafe simples (neutralizar canais).
+## Conexões e Pinagem
 
-## Pinagem
-- **nRF24L01:** conforme ligação na protoboard/PCB.
-- **PWM out:** 8 pinos digitais.
-- **PPM-SUM:** pino único (opcional).
+### nRF24L01 -> Arduino Nano RX
+| nRF24L01 | Arduino Nano |
+|----------|--------------|
+| VCC      | 3.3V         |
+| GND      | GND          |
+| CE       | D8           |
+| CSN      | D7           |
+| SCK      | D13          |
+| MOSI     | D11          |
+| MISO     | D12          |
 
-## Bibliotecas
-- RF24
-- Servo
+*(Nota: Utilize um adaptador para o nRF24L01 ou um regulador 3.3V adequado, o pino 3.3V do Nano pode não fornecer corrente suficiente).*
 
+### Servos e Motores -> Arduino Nano RX
+| Pino Nano | Função (Mix OFF - Normal) | Função (Mix ON - Zagi)   |
+|-----------|---------------------------|--------------------------|
+| **D2**    | Aileron                   | Elevon Esquerdo (L)      |
+| **D3**    | Profundor                 | Elevon Direito (R)       |
+| **D4**    | Acelerador (ESC)          | Acelerador (ESC)         |
+| **D5**    | Leme                      | Leme                     |
+| **D6**    | Extra (Desligado)         | Extra (Desligado)        |
+
+## Controles e Switches no NANO_TX
+* **S1 (Switch 1):** Liga ou desliga o mix Zagi. `1 = ON (Zagi)`, `0 = OFF (Normal)`.
+* **S2 (Switch 2):** Corte de motor de segurança. `1 = Motor Cortado`, `0 = Motor Ativo`.
