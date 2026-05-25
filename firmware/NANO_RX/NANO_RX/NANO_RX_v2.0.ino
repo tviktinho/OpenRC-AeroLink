@@ -37,10 +37,10 @@ const int PWM_MAX = 2000;
 const int PWM_IDLE = 1000;
 
 // Configs Zagi
-float G_E = 1.0;
-float G_A = 1.0;
-float EXPO_E = 0.25;
-float EXPO_A = 0.25;
+float G_E = 1.3;
+float G_A = 1.3;
+float EXPO_E = 0.55;
+float EXPO_A = 0.55;
 float DIFF = -0.30;
 int REFLEX_US = +30;
 
@@ -133,7 +133,7 @@ void loop() {
 
   float E = mapByteToNorm(pkt.p[CH_ELE]);
   float A = mapByteToNorm(pkt.p[CH_AIL]);
-  E = applyExpo(E, EXPO_E) * G_E;
+  E = -applyExpo(E, EXPO_E) * G_E;
   A = applyExpo(A, EXPO_A) * G_A;
 
   if (mix_on) {

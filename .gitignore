@@ -22,3 +22,13 @@ software/pc/.venv_build/
 # IDE
 .vscode/
 .idea/
+
+# PlatformIO build artifacts
+.pio/
+firmware/ESP32_RX/.pio/
+
+# MAVLink c_library_v2 — clone manually: git clone https://github.com/mavlink/c_library_v2 lib/mavlink
+firmware/ESP32_RX/lib/mavlink/
+
+# Claude Code session files
+.claude/
