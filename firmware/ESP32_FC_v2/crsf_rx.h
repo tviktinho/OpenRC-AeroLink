@@ -53,7 +53,11 @@
 #define CRSF_PAYLOAD_SIZE_RC           22
 #define CRSF_FRAME_SIZE                26     // SYNC+LEN+TYPE+22+CRC
 
-#define CRSF_BAUDRATE                  420000UL
+// Baud rate CRSF — alinhado com o lado TX (firmware/TX_NANO_v2/crsf_tx.h).
+// Usamos 400 000 porque o ATmega328P do NANO_TX_v2 só gera essa taxa de
+// forma precisa (0 % de erro). O ESP32 gera 420 000 limpo, então se você
+// usar este header com outro TX em ESP32, pode mudar para 420 000.
+#define CRSF_BAUDRATE                  400000UL
 
 // Limites razoáveis para LEN (sanity check do parser)
 #define CRSF_LEN_MIN                   2

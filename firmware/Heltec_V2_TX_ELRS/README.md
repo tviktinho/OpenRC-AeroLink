@@ -31,7 +31,10 @@ Esta pasta **não contém código C++ próprio** — ela contém a configuraçã
 ┌─────────────────────────────────────────────────────────────┐
 │  NANO_TX_v2                          Heltec V2              │
 │  ───────────                         ──────────             │
-│  TX0 (D1)  ───────────►              GPIO 17  (UART2 RX)    │
+│  TX0 (D1) ──[3k3]──┬──►               GPIO 17 (UART2 RX)    │
+│                   [1k8]                                     │
+│                    │                                        │
+│                   GND                                       │
 │  RX0 (D0)  ◄───────────              GPIO 23  (UART2 TX)    │
 │  GND       ───────────               GND                    │
 │                                                             │
@@ -39,10 +42,18 @@ Esta pasta **não contém código C++ próprio** — ela contém a configuraçã
 │     - Nano: 5V do shield do controle                        │
 │     - Heltec: 5V do USB ou pad VIN (até ~7V)                │
 │                                                             │
-│  💡 Sobre o nível lógico:                                   │
-│     Nano TX0 manda 5V; Heltec GPIO17 é 5V-tolerant nominal. │
-│     Em produção, recomendo divisor 3k3/1k8 (5V → ~3.3V)     │
-│     para máxima segurança da longo prazo.                   │
+│  ⚠️ DIVISOR DE TENSÃO OBRIGATÓRIO entre TX0 do Nano e       │
+│     GPIO 17 do Heltec.                                      │
+│     Nano TX0 manda 5V; GPIOs do ESP32 são 3,3V e NÃO são    │
+│     5V-tolerant (vide datasheet Espressif ESP32 §5.2).      │
+│     Sem divisor, há risco real de dano ao chip — pode       │
+│     funcionar inicialmente e morrer com uso prolongado.     │
+│                                                             │
+│     Opção mais robusta: módulo level shifter bidirecional   │
+│     (TXS0108E, BSS138 — vende a R$ 10 no Mercado Livre).    │
+│                                                             │
+│     Sentido inverso (GPIO 23 → RX0): 3,3V do ESP32 é HIGH   │
+│     válido p/ ATmega328P @ 5V. Esse lado dispensa shifter.  │
 └─────────────────────────────────────────────────────────────┘
 ```
 

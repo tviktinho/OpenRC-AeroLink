@@ -13,7 +13,7 @@ Firmware do **Arduino Nano** do controle, na versão **2.0** que prepara o upgra
 | Aspecto | v1 (`firmware/legacy/NANO_TX_v1_nrf24.ino`) | v2 (este) |
 |---|---|---|
 | Saída RF | nRF24 apenas | nRF24 **+** UART CRSF paralelo |
-| UART | 38400 baud, frame custom para ESP8266 HUD | **420000 baud, frame CRSF** padrão p/ ELRS |
+| UART | 38400 baud, frame custom para ESP8266 HUD | **400000 baud, frame CRSF** padrão p/ ELRS ¹ |
 | ESP8266 HUD | Receptor da UART | **Aposentado** (Heltec assume o HUD) |
 | Encoder/CAL/buzzer | Lidos pelo Nano | **Migram pro Heltec** (Fase 2 — não lidos aqui) |
 | Calibração min/max pots | Sim | Removida (ELRS faz calibração própria via web UI) |
@@ -43,15 +43,26 @@ Firmware do **Arduino Nano** do controle, na versão **2.0** que prepara o upgra
 ├──────────────────────────────────────────────────────────────┤
 │  UART CRSF para HELTEC V2                                    │
 │  ────────────────────────                                    │
-│  TX0 (D1)  ────────► GPIO 17 do Heltec V2  (CRSF data out)   │
-│  RX0 (D0)  ◄──────── GPIO 23 do Heltec V2  (telemetria de    │
-│                                              volta, opcional)│
+│  TX0 (D1)  ──[3k3]──┬──► GPIO 17 do Heltec V2  (CRSF in)     │
+│                    [1k8]                                     │
+│                     │                                        │
+│                    GND                                       │
+│  RX0 (D0)  ◄──────── GPIO 23 do Heltec V2  (telem, opcional) │
 │  GND       ────────  GND comum                               │
 │                                                              │
-│  ⚠️ Não usar divisor de tensão: o Heltec é ESP32 3.3V e o    │
-│     ATmega328 manda 5V no TX0. O ESP32 é 5V-TOLERANT nos     │
-│     pinos de input. Se quiser sair conservador, use um       │
-│     divisor 3k3/1k8 (5V -> ~3.3V).                           │
+│  ⚠️ DIVISOR DE TENSÃO OBRIGATÓRIO no TX0 → GPIO 17.          │
+│     O Nano manda 5V; GPIOs do ESP32 são 3,3V (NÃO são        │
+│     5V-tolerant — datasheet Espressif). Divisor 3k3 / 1k8    │
+│     converte 5V → ~3,3V. Sem ele, risco real de dano ao      │
+│     chip do Heltec (especialmente em uso prolongado).        │
+│                                                              │
+│     Alternativa mais robusta: level shifter bidirecional     │
+│     tipo TXS0108E ou BSS138 (módulo "4-channel logic level   │
+│     converter" — vende a R$ 10 no Mercado Livre).            │
+│                                                              │
+│     Sentido inverso (Heltec GPIO 23 → Nano RX0): 3,3V do     │
+│     ESP32 é HIGH válido p/ o Nano @ 5V (Vih = 3,0V). Esse    │
+│     lado não precisa de level shifter.                       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -61,7 +72,7 @@ Firmware do **Arduino Nano** do controle, na versão **2.0** que prepara o upgra
 
 | Campo | Valor |
 |---|---|
-| Baud rate | **420 000** |
+| Baud rate | **400 000** ¹ |
 | Quadro | `[0xC8] [0x18] [0x16] [22 bytes payload] [CRC8]` |
 | Tipo de frame | `CRSF_FRAMETYPE_RC_CHANNELS_PACKED` (0x16) |
 | Canais | 16 × 11 bit (172..1811) |
@@ -84,6 +95,8 @@ Firmware do **Arduino Nano** do controle, na versão **2.0** que prepara o upgra
 
 > 💡 No ExpressLRS web UI (após bind), você consegue ver os 16 canais chegando. CH1..CH8 vão se mover; CH9..CH16 ficam centrados.
 
+> ¹ **Por que 400 000 e não 420 000 (CRSF padrão)**: o ATmega328P @ 16 MHz não gera 420 000 baud com precisão (cairia em 400 000 real com 4,76 % de erro). Usar 400 000 dá 0 % de erro. ELRS v3+ tem auto-detecção de baud rate; se o seu setup não detectar, configure manualmente em `http://10.0.0.1/hardware.html` → "Serial Baud Rate" = 400000.
+
 ---
 
 ## 🛠 Como compilar e flashar
@@ -99,23 +112,33 @@ Firmware do **Arduino Nano** do controle, na versão **2.0** que prepara o upgra
 
 ## 🧪 Como testar sem o Heltec ligado
 
-Como o frame CRSF é binário, o Serial Monitor padrão não ajuda. Duas opções:
+Como o frame CRSF é binário, o Serial Monitor padrão não ajuda. Três opções:
 
-### A) Hex dump via segundo Arduino
-Use outro Nano/Mega rodando este sketch simples na Serial1 (Mega) a 420000:
+### A) Sniffer em ESP32 (recomendado)
+Use um ESP32 sobrando (qualquer DevKit) com este sketch — o ESP32 gera 400 000 baud limpo, então decodifica sem erro:
 ```c
-void setup(){ Serial.begin(115200); Serial1.begin(420000); }
-void loop(){
-    while (Serial1.available()) {
-        uint8_t b = Serial1.read();
-        Serial.print(b, HEX); Serial.print(' ');
+HardwareSerial CRSF(2);  // UART2
+void setup() {
+    Serial.begin(115200);
+    CRSF.begin(400000, SERIAL_8N1, /*RX=*/16, /*TX=*/17);
+}
+void loop() {
+    while (CRSF.available()) {
+        uint8_t b = CRSF.read();
+        Serial.printf("%02X ", b);
     }
 }
 ```
-Conecte TX0 do Nano_v2 → RX1 (pino 19) do Mega + GND comum. Você verá frames `C8 18 16 ...` a cada 20 ms.
+Conecte TX0 do Nano_v2 → GPIO 16 do ESP32 + GND comum.
+Você verá frames `C8 18 16 ...` a cada 20 ms.
 
-### B) Sniffer no Heltec já flashado
-Se já flashou ELRS no Heltec, abra o painel web (após conectar no WiFi do Heltec) e vá em **Telemetry → CRSF** ou **RC Channels**. As barras devem se mover ao mover os sticks.
+### B) USB-serial direto no PC
+Use um adaptador FTDI/CP2102 ligado em modo "snooping" + um terminal que aceite 400 000 baud (PuTTY, Tera Term, `cu` no Linux). A maioria dos chips USB-serial modernos gera 400 000 limpo.
+
+### C) Sniffer no Heltec já flashado
+Se já flashou ELRS no Heltec, abra o painel web (após conectar no WiFi do Heltec) e vá em **Telemetry → CRSF** ou **RC Channels**. As barras devem se mover ao mover os sticks. É o teste end-to-end mais fácil.
+
+> ⚠️ **NÃO recomendado**: usar outro AVR (Nano/Mega) como sniffer. AVR @ 16 MHz não gera 400 000 limpo em todos os pinos UART (depende do RX usar mesmo divisor U2X que o TX), e Mega 2560 tem `Serial1/2/3` em 400 000 só com `U2X1=1`, que o `Serial.begin()` padrão pode não habilitar — leitura vem corrompida.
 
 ### Verificação rápida no Nano sozinho
 - LED do Nano pisca a cada ~500 ms enquanto o loop estiver rodando.
