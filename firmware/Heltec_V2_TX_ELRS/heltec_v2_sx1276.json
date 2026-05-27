@@ -17,7 +17,7 @@
 
   "prior_target_name": "DIY_900_TX_ESP32_SX127x_RFM95",
 
-  "_radio_pins": "SX1276 conectado via SPI (HSPI/VSPI compartilhado com a OLED ESP32)",
+  "_radio_pins": "SX1276 conectado via SPI dedicado (OLED interna usa I2C SW nos pinos 4/15/16, então não há concorrência de bus com o rádio)",
   "radio_sck": 5,
   "radio_miso": 19,
   "radio_mosi": 27,

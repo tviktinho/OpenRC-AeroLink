@@ -35,7 +35,9 @@
  *   nRF24L01:   CE=D8, CSN=D7, MOSI=D11, MISO=D12, SCK=D13
  *   Pots:       A0..A6 (7 pots, 7º livre se usar shield diferente)
  *   Switches:   D2 (SW1), D3 (SW2), D4 (SW3), D5 (SW4) — INPUT_PULLUP, ativo LOW
- *   UART CRSF:  TX0/D1 -> RX2/GPIO17 do Heltec V2 (3.3V tolerante, sem divisor)
+ *   UART CRSF:  TX0/D1 -> [divisor 3k3/1k8] -> GPIO 17 do Heltec V2
+ *               (ESP32 NÃO é 5V-tolerant — divisor de tensão é obrigatório.
+ *                Alternativa: level shifter bidirecional tipo TXS0108/BSS138.)
  *
  * ============================================================================= */
 

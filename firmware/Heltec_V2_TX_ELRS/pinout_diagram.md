@@ -52,13 +52,13 @@
 ║ GND           ║ Terra                         ║ ✓                         ║
 ║ GPIO 15       ║ SCL OLED (interno)            ║ (reservado, OLED interna) ║
 ║ GPIO 2        ║ ADC2_2, LED (em algumas rev.) ║ livre (boot-sensitive)    ║
-║ GPIO 17       ║ U2_TXD (default)              ║ ✓ UART2 RX (CRSF do Nano) ║
+║ GPIO 17       ║ U2_TXD (default pin)          ║ ✓ UART2 RX REMAPEADO ¹    ║
 ║ GPIO 5        ║ SCK LoRa                      ║ (reservado, SX1276)       ║
 ║ GPIO 18       ║ NSS/CS LoRa                   ║ (reservado, SX1276)       ║
 ║ GPIO 19       ║ MISO LoRa, U0_CTS             ║ (reservado, SX1276)       ║
 ║ GPIO 21       ║ I2C SDA (default)             ║ Fase 2: OLED externa SDA  ║
 ║ GPIO 22       ║ I2C SCL (default)             ║ Fase 2: OLED externa SCL  ║
-║ GPIO 23       ║ V_SPI MOSI alt                ║ ✓ UART2 TX (telem→Nano)   ║
+║ GPIO 23       ║ V_SPI MOSI alt                ║ ✓ UART2 TX REMAPEADO ¹    ║
 ║ GPIO 1 (TX0)  ║ Serial USB TX                 ║ debug via USB             ║
 ║ GPIO 3 (RX0)  ║ Serial USB RX                 ║ debug via USB             ║
 ║ GPIO 0        ║ Botão PRG, boot strapping     ║ Bind ELRS / boot ROM      ║
@@ -66,6 +66,8 @@
 ║ GPIO 4        ║ SDA OLED interna              ║ (reservado, OLED interna) ║
 ╚═══════════════╩═══════════════════════════════╩═══════════════════════════╝
 ```
+
+> ¹ **Sobre o remap da UART2**: por default, no ESP32 a UART2 sai em GPIO 17 (TXD) e entra em GPIO 16 (RXD). No nosso layout, **invertemos os papéis via software** (`hardware.json` + `Serial2.begin(..., RX=17, TX=23)`): GPIO 17 vira RX (recebe CRSF do Nano) e GPIO 23 vira TX (manda telemetria de volta). Fizemos isso porque o GPIO 16 default está sendo usado como saída PWM CH7 no ESP32 FC v2 — então remapear evita conflito. O ESP32 permite usar quase qualquer GPIO como UART, então a troca é segura.
 
 ## Mapa visual da Fase 1
 

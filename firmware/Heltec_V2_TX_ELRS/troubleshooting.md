@@ -17,7 +17,16 @@ Problemas comuns no setup do upgrade ELRS e como diagnosticar.
 ### "Cannot open COM port"
 - Driver CP2102 não instalado → baixe em https://www.silabs.com/.
 - Outro programa usando a porta (Arduino IDE, PlatformIO Monitor) → feche.
-- No Linux/Mac, talvez precise dar `sudo chmod 666 /dev/ttyUSB0`.
+- No Linux, seu usuário precisa estar no grupo que possui o `/dev/ttyUSB*`:
+  ```bash
+  # Descubra o grupo (geralmente dialout no Debian/Ubuntu, uucp no Arch)
+  ls -l /dev/ttyUSB0
+  # Adicione seu usuário ao grupo (exemplo dialout)
+  sudo usermod -aG dialout $USER
+  # Faça logout/login (ou reinicie) para aplicar
+  ```
+  Evite `sudo chmod 666 /dev/ttyUSB0` — abre escrita pra qualquer usuário,
+  expira no próximo reboot e tende a ser "esquecido" na rotina.
 
 ---
 

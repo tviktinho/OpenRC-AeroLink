@@ -21,7 +21,19 @@
  *
  * Helpers `crsf_byte_to_channel(b)` e `crsf_us_to_channel(us)` fazem o mapeamento.
  *
- * Baud rate padrão CRSF: 420 000 baud, 8N1, NÃO invertido (ELRS module = não inv.)
+ * Baud rate CRSF:
+ *   CRSF "clássico" é 420 000 baud. PORÉM o ATmega328P @ 16 MHz NÃO consegue
+ *   gerar 420 000 de forma precisa: com U2X=1 e UBRR=4, a UART produz
+ *   16 000 000 / (8 * 5) = 400 000 baud exatos (0 % de erro). Pedir 420 000
+ *   no Serial.begin() faz o Arduino arredondar pra UBRR=4 e gerar 400 000
+ *   mesmo assim, mas com 4,76 % de erro relativo — alto demais p/ algumas
+ *   implementações CRSF.
+ *
+ *   Solução: usar 400 000 baud, que o AVR gera com 0 % de erro, e configurar
+ *   o módulo ELRS (no Heltec) p/ aceitar esse rate. ELRS v3.x+ tem detecção
+ *   automática de baud rate; v4.x permite configurar manualmente no painel
+ *   web (/hardware.html → "Serial Baud Rate"). Em ESP32 não há essa limitação
+ *   — 420 000 é gerado limpo se você quiser usar do lado do FC.
  *
  * Uso típico:
  *   #include "crsf_tx.h"
@@ -54,8 +66,11 @@
 #define CRSF_PAYLOAD_SIZE_RC           22     // 16 canais * 11 bits / 8 = 22 bytes
 #define CRSF_FRAME_SIZE                (1 + 1 + 1 + CRSF_PAYLOAD_SIZE_RC + 1)  // = 26
 
-// Baud rate padrão (módulos ELRS / Crossfire)
-#define CRSF_BAUDRATE                  420000UL
+// Baud rate CRSF — 400 000 (e não 420 000) porque o ATmega328P @ 16 MHz gera
+// exatamente 400 000 baud com 0 % de erro. Pedir 420 000 cairia em 400 000
+// real com 4,76 % de erro, perigoso para receivers exigentes.
+// Veja nota técnica completa no cabeçalho do arquivo.
+#define CRSF_BAUDRATE                  400000UL
 
 // =============================================================================
 // CRC8 — polinômio 0xD5 (padrão CRSF, tabela lookup é mais rápida porém custa
