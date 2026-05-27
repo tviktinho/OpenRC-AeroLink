@@ -78,57 +78,69 @@ Esta pasta **não contém código C++ próprio** — ela contém a configuraçã
 
 ## 🚀 Flash do firmware ELRS — passo a passo
 
+> ⚠️ **ELRS 4.x mudou o método de hardware custom.** Antes (1.x) era um campo "Custom Hardware Layout" no próprio Configurator. Agora (4.x) o hardware é definido **via web UI no primeiro boot**, arrastando o `hardware.json` deste repo.
+
 ### 1. Instale o ExpressLRS Configurator
 
-Baixe a versão mais recente (v1.6.x ou superior) em https://github.com/ExpressLRS/ExpressLRS-Configurator/releases para seu OS.
+Baixe a versão mais recente em https://github.com/ExpressLRS/ExpressLRS-Configurator/releases para seu OS.
 
 ### 2. Abra o Configurator e selecione
 
-- **Firmware version**: a mais recente estável (v3.5.x na data deste doc)
-- **Category**: `DIY Devices`
-- **Device**: `DIY 900 ESP32 SX127x RFM95 TX via UART`
+- **Categoria**: `DIY devices 900 MHz`
+- **Aparelho**: `DIY ESP32 RFM95 900MHz TX`
+- **Método de instalação**: `UART (Serial)`
+- **Versões**: marque "Mostrar pré-lançamentos" e selecione `4.0.1` ou superior — é nessa série que o fluxo `/hardware.html` está consolidado
 
-### 3. Aplique o layout customizado
+### 3. Configure as opções do aparelho
 
-Esta é a etapa-chave. O target oficial usa um pinout diferente do Heltec V2.
+| Campo | Valor |
+|---|---|
+| **Domínio regulatório** | `915 MHz FCC` (Brasil/EUA) |
+| **Frase de conexão personalizada** | **invente uma frase única** (ex: `aerolink-tcc-vb-2026`) — **anote**, vai precisar idêntica no RX |
+| **Atraso na inicialização do Wi-Fi** | `60` segundos |
+| **Apagar antes de atualizar** | **☑ marcar** (importante — garante que não tem `hardware.json` residual) |
+| **Forçar atualização** | desmarcado |
 
-1. Na tela do Configurator, clique em **"Custom Hardware Layout"** (ou "Custom Target Spec" em versões mais novas).
-2. Cole o **conteúdo de [`heltec_v2_sx1276.json`](./heltec_v2_sx1276.json)** no campo.
-   - Você pode editar o JSON no próprio Configurator antes de flashar.
-3. Confirme.
+### 4. Flash
 
-### 4. Configuração de binding phrase
+- **Plugue a antena 900 MHz no IPEX1** (não pode esquecer)
+- Conecte o Heltec V2 via USB ao PC
+- Clique **INSTALAR**
+- Aguarde 60-120 s. No fim aparece `Done!`
 
-- **Binding Phrase**: defina uma frase única (ex: `aerolink-tcc-vb-2026`) — anote, vai precisar para o RX.
-- **Regulatory Domain**: `Regulatory Domain 915` para o Brasil (ISM 902-928 MHz).
-  - 868 MHz é Europa.
-- **Auto Wifi On Interval**: 60 segundos é confortável.
+### 5. Configurar pinout via web UI (passo NOVO do ELRS 4.x)
 
-### 5. Flash
+Como o Heltec V2 **não é um target oficial**, o ELRS não vai achar o `hardware.json` ao bootar — e por isso vai cair direto em modo WiFi com OLED apagada ou mostrando mensagem do tipo "No HW config".
 
-- Conecte o Heltec V2 via USB.
-- No Configurator, clique em **Build & Flash** (ou **Flash** se já tem build).
-- Selecione a porta COM/serial do Heltec (driver CP2102 instalado).
-- Aguarde — deve mostrar `Done` em 60-120 s.
+1. No celular/PC, conecte no WiFi chamado **`ExpressLRS TX`** (senha: `expresslrs`).
+   - Esse WiFi fica aberto por 60s após boot. Se não aparecer, pressione RST no Heltec.
+2. Abra o navegador em **`http://10.0.0.1/hardware.html`** (note o `/hardware.html`, NÃO só `/`).
+3. Você vai ver uma área de **"drop target"** para arrastar um JSON.
+4. **Arraste o arquivo [`hardware.json`](./hardware.json)** deste repo (a versão limpa, sem comentários) na área indicada.
+   - Alternativa: clique em **"Edit"** e cole o conteúdo manualmente.
+5. Clique em **"Save"** ou **"Apply"**.
+6. O Heltec reboota sozinho com a configuração do Heltec V2 aplicada.
 
-### 6. Boot
+### 6. Boot com pinout correto
 
-- Após reset, o LED branco do Heltec pisca, e a OLED interna mostra a UI nativa do ELRS (versão, modo, RSSI/LQ quando linkado).
-- Nos primeiros 60 s, o Heltec abre um WiFi AP chamado **`ExpressLRS TX`** com senha `expresslrs`.
-  - Conecte um celular/notebook e acesse `http://10.0.0.1` para configurar parâmetros, atualizar firmware OTA, ver canais.
+- Após o reboot, a **OLED interna acende** mostrando logo ELRS + versão + "Searching..."
+- LED branco (GPIO 25) pisca lentamente → procurando RX
+- WiFi `ExpressLRS TX` continua disponível por 60s pra configurar packet rate, potência, etc. em `http://10.0.0.1/`
 
 ### 7. Bind do RX 900 MHz
 
-1. Flashe o RX com o **mesmo binding phrase** (usa o Configurator com o RX selecionado, ou flashe via Betaflight Passthrough se o RX já está num FC).
-2. Ligue o RX → ele entra em bind automaticamente nos primeiros 30 s.
-3. Heltec deve mostrar `LINKED` na OLED e LED do RX deve ficar sólido.
+1. Flashe o RX com o **mesmo binding phrase** (usa o Configurator com o RX selecionado).
+2. Coloque o RX em bind mode: ligue/desligue a alimentação **3 vezes em <2s cada vez**.
+3. Heltec deve mostrar `LINKED` na OLED + LED do RX fica sólido.
 
 ### 8. Teste com o NANO_TX_v2
 
 - Ligue o Nano com o firmware v2 ([`firmware/TX_NANO_v2/`](../TX_NANO_v2/README.md)).
-- Confirme que o LED do Nano está piscando (loop rodando).
-- Conecte TX0 do Nano → GPIO17 do Heltec + GND comum.
-- No web UI do Heltec, vá em **"RC Channels"**: os canais CH1..CH7 devem se mover quando você mexer nos pots. CH8 muda em degraus conforme combinações de switches.
+- Confirme que o LED do Nano está piscando (loop a 50 Hz rodando).
+- Conecte TX0 do Nano → GPIO 17 do Heltec + GND comum.
+- No web UI do Heltec (`http://10.0.0.1`), vá em **"RC Channels"**: os canais CH1..CH7 devem se mover quando você mexer nos pots. CH8 muda em degraus conforme combinações dos 4 switches.
+
+> 💡 **Por que esse fluxo é melhor que o antigo**: você pode reconfigurar pinos do Heltec a qualquer momento via web UI sem refazer o flash. Útil quando for adicionar 2ª OLED, encoder, buzzer na Fase 2 — basta arrastar um `hardware.json` atualizado.
 
 ---
 
@@ -150,7 +162,8 @@ Esta é a etapa-chave. O target oficial usa um pinout diferente do Heltec V2.
 
 ## 📚 Outros docs nesta pasta
 
-- [`heltec_v2_sx1276.json`](./heltec_v2_sx1276.json) — layout custom pra colar no Configurator
+- **[`hardware.json`](./hardware.json)** — **arquivo a arrastar em `/hardware.html`** (formato limpo do ELRS 4.x)
+- [`heltec_v2_sx1276.json`](./heltec_v2_sx1276.json) — versão comentada do mesmo layout (documentação, NÃO usar pra upload)
 - [`pinout_diagram.md`](./pinout_diagram.md) — diagrama detalhado da pinagem
 - [`troubleshooting.md`](./troubleshooting.md) — problemas comuns e soluções
 
