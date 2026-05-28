@@ -4,6 +4,7 @@
   "layout_version": 1,
   "serial_rx": 17,
   "serial_tx": 23,
+  "serial_baudrate": 400000,
   "radio_busy": -1,
   "radio_dio0": 26,
   "radio_dio1": 35,
