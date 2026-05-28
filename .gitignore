@@ -22,3 +22,11 @@ software/pc/.venv_build/
 # IDE
 .vscode/
 .idea/
+
+# PlatformIO build artifacts (cache local, baixado automaticamente em cada máquina)
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Arduino IDE build artifacts
+*.hex.bak

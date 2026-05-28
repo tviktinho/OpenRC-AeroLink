@@ -1,0 +1,45 @@
+{
+  "_comment_about_this_file": [
+    "Layout customizado ExpressLRS para a placa Heltec WiFi LoRa 32 V2.",
+    "Use este JSON como 'Custom Hardware Layout' no ExpressLRS Configurator,",
+    "tendo como target base: DIY_900_TX_ESP32_SX127x_RFM95_via_UART.",
+    "",
+    "Detalhes:",
+    "  - Heltec V2 usa SX1276 (mesmo chip da família que o RFM95).",
+    "  - SPI do SX1276: SCK=5, MISO=19, MOSI=27, NSS=18, RST=14, DIO0=26, DIO1=35.",
+    "  - GPIO 35 é INPUT-ONLY, mas DIO1 só é lido pelo ESP32 (OK).",
+    "  - Heltec V2 NÃO tem TX/RX-enable separados (sem PA externo controlado),",
+    "    então omitimos radio_rxen/radio_txen.",
+    "  - OLED interna SSD1306 0.96\" 128x64 I2C: SDA=4, SCL=15, RST=16.",
+    "  - Serial CRSF (entrada do NANO_TX) na UART2 do ESP32: RX=17, TX=23.",
+    "  - LED indicador: GPIO 25 (LED branco on-board, ativo HIGH)."
+  ],
+
+  "prior_target_name": "DIY_900_TX_ESP32_SX127x_RFM95",
+
+  "_radio_pins": "SX1276 conectado via SPI dedicado (OLED interna usa I2C SW nos pinos 4/15/16, então não há concorrência de bus com o rádio)",
+  "radio_sck": 5,
+  "radio_miso": 19,
+  "radio_mosi": 27,
+  "radio_nss": 18,
+  "radio_rst": 14,
+  "radio_dio0": 26,
+  "radio_dio1": 35,
+
+  "_serial_pins": "UART2 para receber CRSF do NANO_TX (TX0/D1) a 420000 baud",
+  "serial_rx": 17,
+  "serial_tx": 23,
+
+  "_led_pin": "LED branco on-board do Heltec V2",
+  "led": 25,
+
+  "_screen_pins": "OLED SSD1306 0.96\" 128x64 integrada (I2C software)",
+  "screen_sda": 4,
+  "screen_sck": 15,
+  "screen_rst": 16,
+  "screen_type": 1,
+
+  "_button_pin": "Botão PRG da placa (GPIO 0). Pode ser usado para bind/reset.",
+  "button": 0,
+  "button_led_index": 0
+}
