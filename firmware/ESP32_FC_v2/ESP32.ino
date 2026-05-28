@@ -45,6 +45,15 @@
 #include <esp_wifi.h>
 #include <esp_bt.h>
 #include "crsf_rx.h"
+#include "mavlink_min.h"
+
+// =============================================================================
+// MAVLINK_ENABLED: 1 = Serial USB fala MAVLink (Mission Planner / QGC enxergam
+// como vehicle); 0 = Serial USB fala texto humano (debug clássico). Não dá pra
+// fazer os dois ao mesmo tempo: bytes MAVLink no meio do texto bagunçam o GCS,
+// e prints de debug no meio do MAVLink quebram o protocolo.
+// =============================================================================
+#define MAVLINK_ENABLED  1
 
 // =============================================================================
 // PINAGEM
@@ -208,8 +217,14 @@ void setup() {
 
     Serial.begin(115200);
     delay(50);
+#if MAVLINK_ENABLED
+    // Em modo MAVLink, NÃO imprimimos texto na Serial USB — o GCS espera só
+    // bytes binários. Toda info de boot vai pra Serial2 (mesma do CRSF, em
+    // baud diferente, então cuidado se quiser ler). Aqui ficamos mudos.
+#else
     Serial.println();
     Serial.println(F("==== ESP32 FC v2 — entrada CRSF (ELRS 915) ===="));
+#endif
 
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, LOW);
@@ -236,13 +251,17 @@ void setup() {
 
     // CRSF UART2 — remapeada para GPIO 32 (RX) / 33 (TX), 420000 8N1
     Serial2.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
+#if !MAVLINK_ENABLED
     Serial.printf("CRSF iniciado em UART2: RX=GPIO%d TX=GPIO%d @%lu baud\n",
                   PIN_CRSF_RX, PIN_CRSF_TX, (unsigned long)CRSF_BAUDRATE);
+#endif
 
     // Inputs iniciais em estado seguro
     in_ = {PWM_IDLE, 0.0f, 0.0f, 1500, 1500, 1500, 1500, 0, false, true};
 
+#if !MAVLINK_ENABLED
     Serial.println(F("Sistema pronto. Aguardando CRSF..."));
+#endif
 }
 
 // =============================================================================
@@ -290,8 +309,45 @@ void loop() {
         writeAuxiliaries();
     }
 
-    // 5. Debug periódico (1 Hz) na Serial USB
+    // 5. Saída periódica na Serial USB (MAVLink ou texto, conforme MAVLINK_ENABLED)
     uint32_t now = millis();
+
+#if MAVLINK_ENABLED
+    // ---- HEARTBEAT a 1 Hz (Mission Planner reconhece o vehicle) ----
+    static uint32_t last_heartbeat_ms = 0;
+    if (now - last_heartbeat_ms >= 1000) {
+        last_heartbeat_ms = now;
+        // base_mode: manual input habilitado SE não está em failsafe
+        uint8_t base = (millis() - crsf.lastFrameMs() > RX_TIMEOUT_MS)
+                       ? 0
+                       : MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
+        uint8_t state = (millis() - crsf.lastFrameMs() > RX_TIMEOUT_MS)
+                        ? MAV_STATE_STANDBY
+                        : MAV_STATE_ACTIVE;
+        mav_send_heartbeat(Serial, base, state);
+    }
+
+    // ---- RC_CHANNELS_RAW a 10 Hz (canais aparecem no painel "Radio") ----
+    static uint32_t last_rc_ms = 0;
+    if (now - last_rc_ms >= 100) {
+        last_rc_ms = now;
+        uint16_t ch[8] = {
+            (uint16_t)in_.thr_us,
+            (uint16_t)in_.rud_us,
+            // Ailerons e elevador: enviamos os comandos normalizados convertidos pra µs
+            // (sem aplicar mixagem elevon — RC raw é o que veio do RX, não as saídas).
+            (uint16_t)constrain(1500 + (int)(in_.ail_norm * 500), 1000, 2000),
+            (uint16_t)constrain(1500 + (int)(in_.ele_norm * 500), 1000, 2000),
+            (uint16_t)in_.aux1_us,
+            (uint16_t)in_.aux2_us,
+            (uint16_t)in_.aux3_us,
+            // CH8 codifica os 4 switches como µs (1000 + sw_bits * 67) → 16 níveis
+            (uint16_t)(1000 + in_.sw_bits * 67)
+        };
+        mav_send_rc_channels_raw(Serial, now, ch);
+    }
+#else
+    // ---- Debug texto (1 Hz) ----
     if (now - last_print_ms >= 1000) {
         last_print_ms = now;
         Serial.printf("[FC] ok=%lu bad=%lu | thr=%d ele=%+.2f ail=%+.2f rud=%d | sw=0x%X %s%s\n",
@@ -302,6 +358,7 @@ void loop() {
                       in_.manual_mode ? "MANUAL " : "STAB ",
                       in_.motor_cut   ? "CUT"     : "");
     }
+#endif
 
     loop_count++;
 }

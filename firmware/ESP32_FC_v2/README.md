@@ -194,10 +194,69 @@ Sistema pronto. Aguardando CRSF...
 
 ---
 
+## 🛰 Mission Planner / QGroundControl (MAVLink)
+
+O firmware envia **MAVLink v1** pela Serial USB para que GCSs reconheçam o ESP32 como vehicle. Útil pra debug visual dos RC inputs e — quando a Fase 2 trouxer o MPU6050 de volta — pra ver atitude/horizonte artificial.
+
+### Toggle de modo
+
+No topo do `ESP32.ino`:
+```cpp
+#define MAVLINK_ENABLED  1   // 1 = MAVLink; 0 = debug texto antigo
+```
+
+- `MAVLINK_ENABLED = 1` (padrão): Serial USB fala bytes MAVLink. GCS conecta e vê os inputs.
+- `MAVLINK_ENABLED = 0`: Serial USB volta a imprimir texto humano (`[FC] ok=N bad=N ...`).
+
+Não dá pra fazer os dois ao mesmo tempo: bytes MAVLink no meio do texto bagunçam o GCS, e prints de debug no meio do MAVLink quebram o protocolo.
+
+### O que é enviado (com `MAVLINK_ENABLED = 1`)
+
+| Mensagem | Frequência | Conteúdo |
+|---|---|---|
+| `HEARTBEAT` (ID 0) | 1 Hz | `type=FIXED_WING`, `autopilot=GENERIC`, `state=ACTIVE/STANDBY`, `base_mode` reflete failsafe |
+| `RC_CHANNELS_RAW` (ID 35) | 10 Hz | CH1=THR, CH2=RUD, CH3=AIL norm, CH4=ELE norm, CH5..7=AUX, CH8=switches em 16 níveis |
+
+Identidade do vehicle: **SYSTEM_ID = 1, COMPONENT_ID = 1** (autopilot principal).
+
+### Como ligar no Mission Planner
+
+1. Plugue o ESP32 na USB.
+2. Abra o Mission Planner.
+3. No canto superior direito, selecione a **COM port** correspondente ao ESP32 e baud **`115200`**.
+4. Clique **CONNECT**.
+5. Em ~1-2 segundos, MP deve detectar o vehicle:
+   - Status bar muda de "Disconnected" → "MANUAL" (ou similar)
+   - Aparece um vehicle icon
+6. Vai em **CONFIG → Mandatory Hardware → Radio Calibration** (ou **SETUP → Optional Hardware → Radio Calibration** dependendo da versão).
+7. **Mexer os pots do controle** → as barras de Roll, Pitch, Throttle, Yaw, Aux1..Aux4 devem se mover.
+
+### Como ligar no QGroundControl
+
+Idêntico ao MP — QGC também detecta MAVLink em qualquer porta serial automaticamente.
+
+1. Plugue ESP32 na USB.
+2. Abra QGC → ele detecta o vehicle automaticamente em 1-2 s.
+3. Vai em **Vehicle Setup → Radio** → veja os canais se moverem.
+
+### Troubleshooting
+
+| Sintoma | Causa | Solução |
+|---|---|---|
+| "No heartbeat" / "Waiting for vehicle" | Baud rate errado no GCS | Confirma 115200 (não 57600 nem 921600) |
+| Conecta mas RC bars não mexem | `bad=` está alto, ou CRSF travado | Reabre Serial Monitor (`MAVLINK_ENABLED=0`) e olha contadores |
+| Tela do MP toda em vermelho | Failsafe ativo (sem CRSF chegando) | Liga o controle + checa que Nano está mandando |
+| Map fica preto | Sem GPS (esperado nessa fase) | Normal — vamos adicionar GPS na Fase 2 |
+| Vehicle aparece como "Generic" | OK, é proposital | Não estamos emulando ArduPilot/PX4 — somos um FC custom |
+
+---
+
 ## 🔭 Próximos passos (Fase 2)
 
 - Reintegrar **MPU6050** + AHRS (filtro complementar) — base já no `firmware/ESP32/ESP32.ino` legado, é só portar.
+- Adicionar mensagem MAVLink **`ATTITUDE`** (ID 30) com roll/pitch do MPU6050 → MP mostra horizonte artificial.
 - Modo **STAB de verdade**: PID nos sticks usando taxa do gyro como entrada.
 - Telemetria CRSF de volta (RSSI, LQ, voltagem da bateria do avião) — usa o GPIO 33 (TX) que já está cabeado.
+- Parser MAVLink (RX) pra aceitar `PARAM_SET` do MP → ajustar trims/deadzone remotamente.
 - NVS para trims persistentes.
 - Suporte ao **RX single-wire** (alguns clones de ELRS Nano).
