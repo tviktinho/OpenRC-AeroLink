@@ -48,6 +48,8 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <TinyGPSPlus.h>
+#include <LittleFS.h>
+#include <WebServer.h>
 #include "crsf_rx.h"
 #include "mavlink_min.h"
 
@@ -103,6 +105,19 @@ float EXPO_E   = 0.25f;
 float EXPO_A   = 0.25f;
 float DIFF     = -0.30f;
 int   REFLEX_US = +30;
+
+// === AUTO-NÍVEL (modo ângulo, ativado por CH8/ESTAB) ===
+// Stick comanda ÂNGULO-alvo; o MPU corrige (P no erro de ângulo + D na taxa).
+// COMECE CONSERVADOR e ajuste em bancada/voo — ganho alto = oscilação.
+float MAX_ANGLE_DEG       = 45.0f;   // ângulo comandado com stick cheio
+float KP_ROLL             = 0.012f;  // P: erro(graus) -> comando normalizado
+float KD_ROLL             = 0.0035f; // D: taxa(graus/s) -> comando (amortecimento)
+float KP_PITCH            = 0.012f;
+float KD_PITCH            = 0.0035f;
+float PITCH_LEVEL_OFFSET  = 0.0f;    // alvo de pitch "nivelado" (graus) p/ asa-voadora
+// Sinais da correção — INVERTA no bench-test se corrigir pro lado errado
+float STAB_ROLL_SIGN      = +1.0f;
+float STAB_PITCH_SIGN     = +1.0f;
 
 // Failsafe
 constexpr uint32_t RX_TIMEOUT_MS = 200;
@@ -160,6 +175,19 @@ char     g_pwm_report[50] = "PWM: (sem attach)"; // status do attach das saídas
 
 // === GPS ===
 TinyGPSPlus gps;
+
+// === LOG de trajeto (LittleFS) + WiFi p/ download ===
+File     logFile;
+bool     log_ok = false;
+char     g_log_path[24]   = "/trk.csv";
+char     g_log_report[50] = "LOG: (init)";
+char     g_wifi_report[40] = "WiFi off";
+WebServer server(80);
+bool     wifi_on = false;
+const char* AP_SSID = "OpenRC-FC";
+const char* AP_PASS = "openrcaerolink";    // >= 8 chars
+constexpr uint8_t CRSF_IDX_WIFI = 9;       // CH10 > 50% (desarmado) liga o WiFi
+constexpr int     WIFI_ON_US    = 1500;    // limiar "acima de 50%" (centro)
 constexpr float RAD2DEG = 57.2957795f;
 constexpr float DEG2RAD = 0.0174532925f;
 
@@ -188,12 +216,33 @@ inline int norm_to_us(float v) {
 }
 
 // =============================================================================
-// MIXAGEM ELEVON (idêntica ao firmware/ESP32/ESP32.ino)
+// AUTO-NÍVEL (modo ângulo): stick -> ângulo-alvo, MPU corrige (P-ângulo + D-taxa).
+// Saída E (pitch) e A (roll) na MESMA escala normalizada do modo manual, então
+// alimenta a mesma mixagem elevon abaixo.
+// =============================================================================
+void computeStabilized(float &E, float &A) {
+    float tgt_roll       = in_.ail_norm * MAX_ANGLE_DEG;                    // graus
+    float tgt_pitch      = in_.ele_norm * MAX_ANGLE_DEG + PITCH_LEVEL_OFFSET;
+    float err_roll       = tgt_roll  - att_roll_deg;                        // graus
+    float err_pitch      = tgt_pitch - att_pitch_deg;
+    float rate_roll_dps  = rate_roll  * RAD2DEG;                            // graus/s
+    float rate_pitch_dps = rate_pitch * RAD2DEG;
+    A = STAB_ROLL_SIGN  * (KP_ROLL  * err_roll  - KD_ROLL  * rate_roll_dps);
+    E = STAB_PITCH_SIGN * (KP_PITCH * err_pitch - KD_PITCH * rate_pitch_dps);
+}
+
+// =============================================================================
+// MIXAGEM ELEVON — manual (passthrough) OU auto-nível (CH8/ESTAB)
 // =============================================================================
 void mixAndWriteElevon() {
     // Combinação elevon: L = E - A, R = E + A
-    float E = apply_expo(in_.ele_norm, EXPO_E) * G_E;
-    float A = apply_expo(in_.ail_norm, EXPO_A) * G_A;
+    float E, A;
+    if (!in_.manual_mode && mpu_ok) {
+        computeStabilized(E, A);                       // auto-nível (CH8 alto)
+    } else {
+        E = apply_expo(in_.ele_norm, EXPO_E) * G_E;    // manual (passthrough)
+        A = apply_expo(in_.ail_norm, EXPO_A) * G_A;
+    }
 
     float L = E - A;
     float R = E + A;
@@ -295,12 +344,110 @@ void updateIMU() {
 }
 
 // =============================================================================
+// LOG de trajeto (LittleFS) — grava posições do GPS na flash interna
+// =============================================================================
+void startLog() {
+    if (!LittleFS.begin(true)) {   // true = formata na 1a vez
+        snprintf(g_log_report, sizeof(g_log_report), "LOG: LittleFS falhou");
+        return;
+    }
+    // sequência: arquivo novo a cada boot (/trk1.csv, /trk2.csv, ...)
+    uint32_t seq = 0;
+    File sf = LittleFS.open("/seq.txt", "r");
+    if (sf) { seq = sf.parseInt(); sf.close(); }
+    seq++;
+    sf = LittleFS.open("/seq.txt", "w");
+    if (sf) { sf.print(seq); sf.close(); }
+
+    snprintf(g_log_path, sizeof(g_log_path), "/trk%lu.csv", (unsigned long)seq);
+    logFile = LittleFS.open(g_log_path, "w");
+    if (logFile) {
+        logFile.println("ms,lat,lon,alt_m,sats,spd_mps,crs_deg");
+        logFile.flush();
+        log_ok = true;
+        snprintf(g_log_report, sizeof(g_log_report), "LOG: %s", g_log_path);
+    } else {
+        snprintf(g_log_report, sizeof(g_log_report), "LOG: open falhou");
+    }
+}
+
+// =============================================================================
+// WiFi AP + servidor web — baixar os logs no chão (desarmado)
+// =============================================================================
+void handleRoot() {
+    String html = F("<html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "<title>OpenRC FC logs</title></head><body style='font-family:sans-serif'>"
+                    "<h2>OpenRC AeroLink - Logs de voo</h2><ul>");
+    File root = LittleFS.open("/");
+    File f = root.openNextFile();
+    while (f) {
+        String n = f.name();
+        if (n.endsWith(".csv")) {
+            html += "<li><a href='/dl?f=" + n + "'>" + n + "</a> (" + String(f.size()) + " B)</li>";
+        }
+        f = root.openNextFile();
+    }
+    html += F("</ul><p><a href='/clear' onclick=\"return confirm('Apagar todos os logs?')\">Apagar todos</a></p>"
+              "</body></html>");
+    server.send(200, "text/html", html);
+}
+
+void handleDownload() {
+    if (!server.hasArg("f")) { server.send(400, "text/plain", "missing f"); return; }
+    String name = server.arg("f");
+    if (!name.startsWith("/")) name = "/" + name;
+    File f = LittleFS.open(name, "r");
+    if (!f) { server.send(404, "text/plain", "not found"); return; }
+    server.streamFile(f, "text/csv");
+    f.close();
+}
+
+void handleClear() {
+    // para de gravar e apaga todos os .csv (power-cycle inicia log novo)
+    log_ok = false;
+    if (logFile) logFile.close();
+    String names[32]; int n = 0;
+    File root = LittleFS.open("/");
+    File f = root.openNextFile();
+    while (f && n < 32) {
+        String nm = f.name();
+        if (nm.endsWith(".csv")) names[n++] = nm.startsWith("/") ? nm : ("/" + nm);
+        f = root.openNextFile();
+    }
+    for (int i = 0; i < n; i++) LittleFS.remove(names[i]);
+    server.send(200, "text/html", "<html><body>Logs apagados. Reinicie o ESP p/ novo log. <a href='/'>voltar</a></body></html>");
+}
+
+void startWifiAP() {
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_AP);
+    delay(100);                                   // estabiliza antes do softAP
+    bool ok = WiFi.softAP(AP_SSID, AP_PASS);
+    IPAddress ip = WiFi.softAPIP();
+    snprintf(g_wifi_report, sizeof(g_wifi_report), "WiFi %s ip=%s",
+             ok ? "ON" : "FALHOU", ip.toString().c_str());
+    if (ok) {
+        server.on("/", handleRoot);
+        server.on("/dl", handleDownload);
+        server.on("/clear", handleClear);
+        server.begin();
+    }
+}
+
+void stopWifiAP() {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    snprintf(g_wifi_report, sizeof(g_wifi_report), "WiFi off");
+}
+
+// =============================================================================
 // SETUP
 // =============================================================================
 void setup() {
-    // Economia de bateria: desliga WiFi e BT (~80 mA)
-    WiFi.mode(WIFI_OFF);
-    esp_wifi_stop();
+    // WiFi NÃO é inicializado no boot (fica off por padrão, baixo consumo).
+    // Inicializar e desligar aqui (WIFI_OFF) quebrava o softAP depois — por isso
+    // só ativamos o WiFi sob demanda em startWifiAP(). BT sempre off.
     esp_bt_controller_disable();
 
     Serial.begin(115200);
@@ -386,6 +533,9 @@ void setup() {
     Serial.printf("%s | MPU6050: %s (0x%02X)\n", g_i2c_report, mpu_ok ? "OK" : "NAO", g_mpu_addr);
 #endif
 
+    // Log de trajeto na flash interna (LittleFS)
+    startLog();
+
     // Inputs iniciais em estado seguro: desarmado + manual
     in_ = {PWM_IDLE, 0.0f, 0.0f, 1500, 1500, 1500, 1500, false, true};
 
@@ -452,6 +602,28 @@ void loop() {
         last_imu_ms = now;
         updateIMU();
     }
+
+    // LOG: grava posição do GPS a 1 Hz quando há fix (independe da telemetria)
+    static uint32_t last_log_ms = 0;
+    if (log_ok && now - last_log_ms >= 1000) {
+        last_log_ms = now;
+        if (gps.location.isValid()) {
+            logFile.printf("%lu,%.7f,%.7f,%.1f,%u,%.1f,%.1f\n",
+                (unsigned long)now, gps.location.lat(), gps.location.lng(),
+                gps.altitude.isValid()    ? gps.altitude.meters()        : 0.0,
+                gps.satellites.isValid()  ? (unsigned)gps.satellites.value() : 0,
+                gps.speed.isValid()       ? gps.speed.mps()              : 0.0,
+                gps.course.isValid()      ? gps.course.deg()             : 0.0);
+            logFile.flush();   // garante que o ponto sobrevive a queda de energia
+        }
+    }
+
+    // WiFi p/ baixar log: só no CHÃO (desarmado) e com o switch CH10 acima de 50%.
+    bool wifi_want = !in_.armed &&
+        (crsf_channel_to_us(crsf.getChannel(CRSF_IDX_WIFI)) > WIFI_ON_US);
+    if (wifi_want && !wifi_on)      { startWifiAP(); wifi_on = true; }
+    else if (!wifi_want && wifi_on) { stopWifiAP();  wifi_on = false; }
+    if (wifi_on) server.handleClient();
 
 #if MAVLINK_ENABLED
     // ---- HEARTBEAT a 1 Hz (Mission Planner reconhece o vehicle) ----
@@ -522,16 +694,29 @@ void loop() {
     static uint8_t  status_idx = 0;
     if (now - last_status_ms >= 3000) {
         last_status_ms = now;
-        char gpsbuf[50];
+        char buf[50];
         const char *msg; uint8_t sev = MAV_SEVERITY_INFO;
-        switch (status_idx++ % 3) {
+        switch (status_idx++ % 5) {
             case 0: msg = g_i2c_report; sev = mpu_ok ? MAV_SEVERITY_INFO : MAV_SEVERITY_CRITICAL; break;
             case 1: msg = g_pwm_report; sev = strstr(g_pwm_report, "FALH") ? MAV_SEVERITY_CRITICAL : MAV_SEVERITY_INFO; break;
+            case 2:
+                // rx = bytes recebidos do GPS: 0 = nada chegando (fiação/energia/baud);
+                // subindo = GPS vivo e falando (só falta fix/satélite).
+                snprintf(buf, sizeof(buf), "GPS: %s sats=%u rx=%lu",
+                         gps.location.isValid() ? "FIX" : "nofix",
+                         gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0,
+                         (unsigned long)gps.charsProcessed());
+                msg = buf; break;
+            case 3:
+                // Modo de voo ativo: MANUAL (CH8 baixo) ou ESTAB/auto-nível (CH8 alto)
+                snprintf(buf, sizeof(buf), "MODO: %s | %s | roll=%d pitch=%d",
+                         (!in_.manual_mode && mpu_ok) ? "AUTO-NIVEL" : "MANUAL",
+                         in_.armed ? "ARMADO" : "DESARMADO",
+                         (int)att_roll_deg, (int)att_pitch_deg);
+                msg = buf; break;
             default:
-                snprintf(gpsbuf, sizeof(gpsbuf), "GPS: %s sats=%u",
-                         gps.location.isValid() ? "FIX" : "sem fix",
-                         gps.satellites.isValid() ? (unsigned)gps.satellites.value() : 0);
-                msg = gpsbuf; break;
+                snprintf(buf, sizeof(buf), "%s | %s", g_log_report, g_wifi_report);
+                msg = buf; break;
         }
         mav_send_statustext(Serial, sev, msg);
     }
