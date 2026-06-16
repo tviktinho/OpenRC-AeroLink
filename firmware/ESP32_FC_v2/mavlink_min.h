@@ -39,6 +39,7 @@
 #define MAVLINK_MIN_H
 
 #include <Arduino.h>
+#include <string.h>
 
 // =============================================================================
 // Constantes MAVLink v1
@@ -198,6 +199,121 @@ static inline void mav_send_rc_channels_raw(Stream &s,
     mav_send_frame(s, MAVLINK_MSG_ID_RC_CHANNELS_RAW, payload,
                    MAVLINK_PAYLOAD_LEN_RC_CHANNELS_RAW,
                    MAVLINK_CRC_RC_CHANNELS_RAW);
+}
+
+// =============================================================================
+// ATTITUDE (MSG ID 30) — 28 bytes — alimenta o horizonte artificial do MP
+//
+// Layout (little-endian):
+//   uint32 time_boot_ms
+//   float  roll, pitch, yaw                (radianos)
+//   float  rollspeed, pitchspeed, yawspeed (rad/s)
+// =============================================================================
+#define MAVLINK_MSG_ID_ATTITUDE          30
+#define MAVLINK_CRC_ATTITUDE             39
+#define MAVLINK_PAYLOAD_LEN_ATTITUDE     28
+
+static inline void mav_put_float(uint8_t *p, float v) {
+    memcpy(p, &v, 4);   // ESP32 e MAVLink são ambos little-endian
+}
+
+static inline void mav_send_attitude(Stream &s, uint32_t time_boot_ms,
+                                     float roll, float pitch, float yaw,
+                                     float rollspeed, float pitchspeed, float yawspeed) {
+    uint8_t payload[MAVLINK_PAYLOAD_LEN_ATTITUDE] = {0};
+    payload[0] = (uint8_t)(time_boot_ms        & 0xFF);
+    payload[1] = (uint8_t)((time_boot_ms >> 8)  & 0xFF);
+    payload[2] = (uint8_t)((time_boot_ms >> 16) & 0xFF);
+    payload[3] = (uint8_t)((time_boot_ms >> 24) & 0xFF);
+    mav_put_float(&payload[4],  roll);
+    mav_put_float(&payload[8],  pitch);
+    mav_put_float(&payload[12], yaw);
+    mav_put_float(&payload[16], rollspeed);
+    mav_put_float(&payload[20], pitchspeed);
+    mav_put_float(&payload[24], yawspeed);
+    mav_send_frame(s, MAVLINK_MSG_ID_ATTITUDE, payload,
+                   MAVLINK_PAYLOAD_LEN_ATTITUDE, MAVLINK_CRC_ATTITUDE);
+}
+
+// =============================================================================
+// STATUSTEXT (MSG ID 253) — 51 bytes — texto na aba "Messages" do Mission Planner
+//   uint8 severity ; char text[50]
+// =============================================================================
+#define MAVLINK_MSG_ID_STATUSTEXT        253
+#define MAVLINK_CRC_STATUSTEXT           83
+#define MAVLINK_PAYLOAD_LEN_STATUSTEXT   51
+
+#define MAV_SEVERITY_CRITICAL            2
+#define MAV_SEVERITY_INFO                6
+
+static inline void mav_send_statustext(Stream &s, uint8_t severity, const char *text) {
+    uint8_t payload[MAVLINK_PAYLOAD_LEN_STATUSTEXT] = {0};
+    payload[0] = severity;
+    for (uint8_t i = 0; i < 50 && text[i]; i++) payload[1 + i] = (uint8_t)text[i];
+    mav_send_frame(s, MAVLINK_MSG_ID_STATUSTEXT, payload,
+                   MAVLINK_PAYLOAD_LEN_STATUSTEXT, MAVLINK_CRC_STATUSTEXT);
+}
+
+// =============================================================================
+// Helpers de empacotamento little-endian (inteiros)
+// =============================================================================
+static inline void mav_put_u16(uint8_t *p, uint16_t v) { p[0]=v&0xFF; p[1]=v>>8; }
+static inline void mav_put_i16(uint8_t *p, int16_t  v) { mav_put_u16(p, (uint16_t)v); }
+static inline void mav_put_u32(uint8_t *p, uint32_t v) { for(int i=0;i<4;i++) p[i]=(v>>(8*i))&0xFF; }
+static inline void mav_put_i32(uint8_t *p, int32_t  v) { mav_put_u32(p, (uint32_t)v); }
+static inline void mav_put_u64(uint8_t *p, uint64_t v) { for(int i=0;i<8;i++) p[i]=(v>>(8*i))&0xFF; }
+
+// =============================================================================
+// GPS_RAW_INT (MSG ID 24) — 30 bytes — status/satélites do GPS no MP
+//   uint64 time_usec; int32 lat,lon,alt; uint16 eph,epv,vel,cog;
+//   uint8 fix_type, satellites_visible
+// =============================================================================
+#define MAVLINK_MSG_ID_GPS_RAW_INT        24
+#define MAVLINK_CRC_GPS_RAW_INT           24
+#define MAVLINK_PAYLOAD_LEN_GPS_RAW_INT   30
+
+static inline void mav_send_gps_raw_int(Stream &s, uint64_t time_usec, uint8_t fix_type,
+                                        int32_t lat, int32_t lon, int32_t alt,
+                                        uint16_t vel, uint16_t cog, uint8_t sats) {
+    uint8_t p[MAVLINK_PAYLOAD_LEN_GPS_RAW_INT] = {0};
+    mav_put_u64(&p[0],  time_usec);
+    mav_put_i32(&p[8],  lat);
+    mav_put_i32(&p[12], lon);
+    mav_put_i32(&p[16], alt);
+    mav_put_u16(&p[20], 0xFFFF);   // eph (desconhecido)
+    mav_put_u16(&p[22], 0xFFFF);   // epv
+    mav_put_u16(&p[24], vel);
+    mav_put_u16(&p[26], cog);
+    p[28] = fix_type;
+    p[29] = sats;
+    mav_send_frame(s, MAVLINK_MSG_ID_GPS_RAW_INT, p,
+                   MAVLINK_PAYLOAD_LEN_GPS_RAW_INT, MAVLINK_CRC_GPS_RAW_INT);
+}
+
+// =============================================================================
+// GLOBAL_POSITION_INT (MSG ID 33) — 28 bytes — posição no mapa do MP
+//   uint32 time_boot_ms; int32 lat,lon,alt,relative_alt; int16 vx,vy,vz; uint16 hdg
+// =============================================================================
+#define MAVLINK_MSG_ID_GLOBAL_POSITION_INT      33
+#define MAVLINK_CRC_GLOBAL_POSITION_INT         104
+#define MAVLINK_PAYLOAD_LEN_GLOBAL_POSITION_INT 28
+
+static inline void mav_send_global_position_int(Stream &s, uint32_t time_boot_ms,
+                                                int32_t lat, int32_t lon, int32_t alt,
+                                                int32_t rel_alt, int16_t vx, int16_t vy,
+                                                int16_t vz, uint16_t hdg) {
+    uint8_t p[MAVLINK_PAYLOAD_LEN_GLOBAL_POSITION_INT] = {0};
+    mav_put_u32(&p[0],  time_boot_ms);
+    mav_put_i32(&p[4],  lat);
+    mav_put_i32(&p[8],  lon);
+    mav_put_i32(&p[12], alt);
+    mav_put_i32(&p[16], rel_alt);
+    mav_put_i16(&p[20], vx);
+    mav_put_i16(&p[22], vy);
+    mav_put_i16(&p[24], vz);
+    mav_put_u16(&p[26], hdg);
+    mav_send_frame(s, MAVLINK_MSG_ID_GLOBAL_POSITION_INT, p,
+                   MAVLINK_PAYLOAD_LEN_GLOBAL_POSITION_INT, MAVLINK_CRC_GLOBAL_POSITION_INT);
 }
 
 #endif // MAVLINK_MIN_H
