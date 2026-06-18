@@ -47,6 +47,7 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
 #include <TinyGPSPlus.h>
 #include <LittleFS.h>
 #include <WebServer.h>
@@ -183,6 +184,16 @@ uint32_t last_imu_us = 0;
 char     g_i2c_report[50] = "I2C: (sem scan)";   // resultado do scan p/ STATUSTEXT
 uint8_t  g_mpu_addr = 0;
 char     g_pwm_report[50] = "PWM: (sem attach)"; // status do attach das saídas
+
+// === Barômetro BMP280 (mesmo I2C do MPU) ===
+Adafruit_BMP280 bmp;
+bool   bmp_ok = false;
+float  baro_p0_hpa = 1013.25f;   // pressão de referência (solo, capturada no boot)
+float  baro_alt = 0.0f;          // altitude relativa ao solo (m)
+float  baro_climb = 0.0f;        // taxa de subida (m/s), filtrada
+float  baro_press = 0.0f;        // pressão (hPa)
+float  baro_temp = 0.0f;         // temperatura (°C)
+char   g_baro_report[36] = "BARO: --";
 
 // === GPS ===
 TinyGPSPlus gps;
@@ -750,6 +761,20 @@ void setup() {
     Serial.printf("%s | MPU6050: %s (0x%02X)\n", g_i2c_report, mpu_ok ? "OK" : "NAO", g_mpu_addr);
 #endif
 
+    // BMP280 no mesmo I2C (0x76 ou 0x77). Captura pressão de solo p/ altitude relativa.
+    if (bmp.begin(0x76) || bmp.begin(0x77)) {
+        bmp_ok = true;
+        bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2,
+                        Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X16,
+                        Adafruit_BMP280::STANDBY_MS_1);
+        delay(50);
+        double sp = 0; for (int i = 0; i < 20; i++) { sp += bmp.readPressure() / 100.0; delay(10); }
+        baro_p0_hpa = (float)(sp / 20.0);
+        snprintf(g_baro_report, sizeof(g_baro_report), "BARO ok p0=%.1f", baro_p0_hpa);
+    } else {
+        snprintf(g_baro_report, sizeof(g_baro_report), "BARO nao detectado");
+    }
+
     // Log de trajeto na flash interna (LittleFS)
     startLog();
 
@@ -824,6 +849,18 @@ void loop() {
     if (mpu_ok && now - last_imu_ms >= 10) {
         last_imu_ms = now;
         updateIMU();
+    }
+
+    // Barômetro: ~20 Hz, altitude relativa ao solo + taxa de subida (filtrada)
+    static uint32_t last_baro_ms = 0;
+    if (bmp_ok && now - last_baro_ms >= 50) {
+        float dt = (now - last_baro_ms) / 1000.0f;
+        last_baro_ms = now;
+        baro_press = bmp.readPressure() / 100.0f;     // hPa
+        baro_temp  = bmp.readTemperature();           // °C
+        float a = 44330.0f * (1.0f - powf(baro_press / baro_p0_hpa, 0.1903f));
+        if (dt > 0.001f) baro_climb = 0.8f * baro_climb + 0.2f * ((a - baro_alt) / dt);
+        baro_alt = a;
     }
 
     // LOG: grava posição do GPS a 1 Hz quando há fix (independe da telemetria)
@@ -927,6 +964,15 @@ void loop() {
         }
     }
 
+    // ---- Barômetro a 10 Hz: VFR_HUD (altitude no HUD do MP) + SCALED_PRESSURE ----
+    static uint32_t last_baro_tx = 0;
+    if (bmp_ok && now - last_baro_tx >= 100) {
+        last_baro_tx = now;
+        float gs = gps.speed.isValid() ? (float)gps.speed.mps() : 0.0f;
+        mav_send_vfr_hud(*g_mav, 0.0f, gs, 0, 0, baro_alt, baro_climb);
+        mav_send_scaled_pressure(*g_mav, now, baro_press, baro_temp);
+    }
+
     // ---- STATUSTEXT a cada 3 s, rotativo: I2C/MPU, PWM, GPS (aba Messages) ----
     static uint32_t last_status_ms = 0;
     static uint8_t  status_idx = 0;
@@ -934,7 +980,7 @@ void loop() {
         last_status_ms = now;
         char buf[50];
         const char *msg; uint8_t sev = MAV_SEVERITY_INFO;
-        switch (status_idx++ % 6) {
+        switch (status_idx++ % 7) {
             case 0: msg = g_i2c_report; sev = mpu_ok ? MAV_SEVERITY_INFO : MAV_SEVERITY_CRITICAL; break;
             case 1: msg = g_pwm_report; sev = strstr(g_pwm_report, "FALH") ? MAV_SEVERITY_CRITICAL : MAV_SEVERITY_INFO; break;
             case 2:
@@ -955,8 +1001,11 @@ void loop() {
             case 4:
                 snprintf(buf, sizeof(buf), "%s | %s", g_log_report, g_wifi_report);
                 msg = buf; break;
-            default:
+            case 5:
                 msg = g_calib_report; break;
+            default:
+                snprintf(buf, sizeof(buf), "%s alt=%.1fm", g_baro_report, baro_alt);
+                msg = buf; break;
         }
         mav_send_statustext(*g_mav,sev, msg);
     }

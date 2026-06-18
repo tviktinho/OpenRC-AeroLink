@@ -391,4 +391,35 @@ static inline void mav_send_command_ack(Stream &s, uint16_t cmd, uint8_t result)
     mav_send_frame(s, MAVLINK_MSG_ID_COMMAND_ACK, p, 3, MAVLINK_CRC_COMMAND_ACK);
 }
 
+// =============================================================================
+// Barômetro: VFR_HUD (altitude no HUD do MP) + SCALED_PRESSURE (pressão/temp)
+// =============================================================================
+#define MAVLINK_MSG_ID_SCALED_PRESSURE     29
+#define MAVLINK_CRC_SCALED_PRESSURE        115
+#define MAVLINK_MSG_ID_VFR_HUD             74
+#define MAVLINK_CRC_VFR_HUD                20
+
+// SCALED_PRESSURE (id 29) — 14 bytes: u32 time, float press_abs, float press_diff, i16 temp(cdeg)
+static inline void mav_send_scaled_pressure(Stream &s, uint32_t t_ms, float press_abs_hpa, float temp_c) {
+    uint8_t p[14] = {0};
+    mav_put_u32(&p[0], t_ms);
+    mav_put_float(&p[4], press_abs_hpa);
+    mav_put_float(&p[8], 0.0f);                       // press_diff
+    mav_put_i16(&p[12], (int16_t)(temp_c * 100.0f));
+    mav_send_frame(s, MAVLINK_MSG_ID_SCALED_PRESSURE, p, 14, MAVLINK_CRC_SCALED_PRESSURE);
+}
+
+// VFR_HUD (id 74) — 20 bytes (wire: float airspeed,groundspeed,alt,climb; i16 hdg; u16 thr)
+static inline void mav_send_vfr_hud(Stream &s, float airspeed, float groundspeed,
+                                    int16_t heading, uint16_t throttle, float alt, float climb) {
+    uint8_t p[20] = {0};
+    mav_put_float(&p[0],  airspeed);
+    mav_put_float(&p[4],  groundspeed);
+    mav_put_float(&p[8],  alt);
+    mav_put_float(&p[12], climb);
+    mav_put_i16(&p[16], heading);
+    mav_put_u16(&p[18], throttle);
+    mav_send_frame(s, MAVLINK_MSG_ID_VFR_HUD, p, 20, MAVLINK_CRC_VFR_HUD);
+}
+
 #endif // MAVLINK_MIN_H
