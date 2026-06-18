@@ -51,6 +51,7 @@
 #include <LittleFS.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <Update.h>
 #include "crsf_rx.h"
 #include "mavlink_min.h"
 
@@ -474,6 +475,7 @@ void handleRoot() {
         f = root.openNextFile();
     }
     html += F("</ul><p><a href='/clear' onclick=\"return confirm('Apagar todos os logs?')\">Apagar todos</a></p>"
+              "<p><a href='/update'>Atualizar firmware (OTA)</a></p>"
               "</body></html>");
     server.send(200, "text/html", html);
 }
@@ -504,6 +506,39 @@ void handleClear() {
     server.send(200, "text/html", "<html><body>Logs apagados. Reinicie o ESP p/ novo log. <a href='/'>voltar</a></body></html>");
 }
 
+// ---- OTA: atualizar o firmware por WiFi (página /update no AP) ----
+void handleUpdatePage() {
+    server.send(200, "text/html",
+        F("<html><head><meta name=viewport content='width=device-width,initial-scale=1'></head>"
+          "<body style='font-family:sans-serif'><h2>OTA - atualizar firmware</h2>"
+          "<form method='POST' action='/update' enctype='multipart/form-data'>"
+          "<input type='file' name='fw' accept='.bin'><br><br>"
+          "<input type='submit' value='Enviar e gravar'></form>"
+          "<p>Use o arquivo .pio/build/esp32dev/firmware.bin. NAO desligue durante o envio.</p>"
+          "<a href='/'>voltar</a></body></html>"));
+}
+
+void handleUpdateUpload() {
+    HTTPUpload& up = server.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        log_ok = false;                          // pausa o log durante a gravação
+        Update.begin(UPDATE_SIZE_UNKNOWN);       // grava na partição OTA livre
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        Update.write(up.buf, up.currentSize);
+    } else if (up.status == UPLOAD_FILE_END) {
+        Update.end(true);
+    }
+}
+
+void handleUpdateDone() {
+    bool ok = !Update.hasError();
+    server.send(200, "text/html", ok
+        ? "<html><body>OK! Reiniciando com o novo firmware...</body></html>"
+        : "<html><body>FALHOU no OTA. Tente de novo.</body></html>");
+    delay(300);
+    if (ok) ESP.restart();
+}
+
 void startWifiAP() {
     WiFi.persistent(false);
     WiFi.mode(WIFI_AP);
@@ -516,6 +551,8 @@ void startWifiAP() {
         server.on("/", handleRoot);
         server.on("/dl", handleDownload);
         server.on("/clear", handleClear);
+        server.on("/update", HTTP_GET, handleUpdatePage);
+        server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
         server.begin();
         mavServer.begin();          // MAVLink TCP p/ Mission Planner (porta 5760)
         mavServer.setNoDelay(true);
