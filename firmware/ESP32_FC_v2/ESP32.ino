@@ -50,6 +50,7 @@
 #include <TinyGPSPlus.h>
 #include <LittleFS.h>
 #include <WebServer.h>
+#include <Preferences.h>
 #include "crsf_rx.h"
 #include "mavlink_min.h"
 
@@ -65,9 +66,10 @@
 // PINAGEM
 // =============================================================================
 // Saídas PWM
-// CH1 (ESC/Throttle) movido de GPIO12 -> GPIO4: GPIO12 é strapping pin e falhava
-// no attach do ESP32Servo. GPIO4 é livre (era nRF24 CE) e seguro p/ sinal de ESC.
-constexpr uint8_t PIN_CH1 = 4;    // Throttle / ESC
+// CH1 (ESC/Throttle) no GPIO21 (liberado ao mover o SDA do I2C p/ o GPIO23).
+// GPIO21 é pino limpo (sem strapping/UART) -> attach do PWM funciona.
+// (NÃO usar GPIO3/RX: UART0 bloqueia. GPIO12 era strapping. GPIO4 era o anterior.)
+constexpr uint8_t PIN_CH1 = 21;   // Throttle / ESC
 constexpr uint8_t PIN_CH2 = 13;   // Rudder (não usado em delta puro)
 constexpr uint8_t PIN_CH3 = 14;   // Elevon ESQUERDO (saída pós-mix)
 constexpr uint8_t PIN_CH4 = 27;   // Elevon DIREITO  (saída pós-mix)
@@ -84,7 +86,8 @@ constexpr uint8_t PIN_CRSF_TX = 33;   // → RX do RX ELRS (telemetria, futuro)
 constexpr uint8_t PIN_LED = 2;
 
 // MPU6050 (I2C) — atitude p/ horizonte artificial
-constexpr uint8_t PIN_MPU_SDA = 21;
+// SDA movido 21->23 p/ liberar o GPIO21 para o ESC (CH1). SCL fica no 22.
+constexpr uint8_t PIN_MPU_SDA = 23;
 constexpr uint8_t PIN_MPU_SCL = 22;
 
 // GPS (UART1 do ESP32) — GY-NEO6MV2, 9600 baud NMEA
@@ -105,6 +108,9 @@ float EXPO_E   = 0.25f;
 float EXPO_A   = 0.25f;
 float DIFF     = -0.30f;
 int   REFLEX_US = +30;
+// Reverso de cada elevon (0 = normal, 1 = invertido) — ajustável por parâmetro
+float srv_rev_l = 0.0f;
+float srv_rev_r = 0.0f;
 
 // === AUTO-NÍVEL (modo ângulo, ativado por CH8/ESTAB) ===
 // Stick comanda ÂNGULO-alvo; o MPU corrige (P no erro de ângulo + D na taxa).
@@ -118,6 +124,10 @@ float PITCH_LEVEL_OFFSET  = 0.0f;    // alvo de pitch "nivelado" (graus) p/ asa-
 // Sinais da correção — INVERTA no bench-test se corrigir pro lado errado
 float STAB_ROLL_SIGN      = +1.0f;
 float STAB_PITCH_SIGN     = +1.0f;
+
+// Troca eixos roll<->pitch (comando de roll estava agindo como pitch e vice-versa).
+// Vale p/ manual E estabilizado. Param AHRS_SWAP: 0 = normal, 1 = trocado.
+float swap_rp = 1.0f;
 
 // Failsafe
 constexpr uint32_t RX_TIMEOUT_MS = 200;
@@ -186,14 +196,60 @@ WebServer server(80);
 bool     wifi_on = false;
 const char* AP_SSID = "OpenRC-FC";
 const char* AP_PASS = "openrcaerolink";    // >= 8 chars
-constexpr uint8_t CRSF_IDX_WIFI = 9;       // CH10 > 50% (desarmado) liga o WiFi
-constexpr int     WIFI_ON_US    = 1500;    // limiar "acima de 50%" (centro)
+constexpr uint8_t CRSF_IDX_WIFI  = 9;      // CH10 > 50% (desarmado) liga o WiFi
+constexpr uint8_t CRSF_IDX_CALIB = 8;      // CH9 (botão momentâneo) calibra o MPU
+constexpr int     WIFI_ON_US     = 1500;   // limiar "acima de 50%" (centro)
+
+// MAVLink por WiFi (TCP) — Mission Planner conecta em 192.168.4.1:5760
+WiFiServer  mavServer(5760);
+WiFiClient  mavClient;
+Stream*     g_mav = (Stream*)&Serial;       // saída MAVLink: USB ou cliente WiFi
+
+// Calibração de gyro pelo CH9 (acumula enquanto segura, finaliza ao soltar)
+bool     calib_btn = false, calib_was = false;
+uint32_t calib_n = 0;
+double   calib_sx = 0, calib_sy = 0, calib_sz = 0;
+char     g_calib_report[40] = "MPU: ok";
+int      mpu_fail = 0;                       // contador de falhas de leitura I2C
+constexpr int PIN_BUZZER = -1;               // -1 = sem buzzer; defina o GPIO p/ ativar
 constexpr float RAD2DEG = 57.2957795f;
 constexpr float DEG2RAD = 0.0174532925f;
 
-// Orientação do MPU — inverta os sinais se o horizonte vier trocado/invertido
-constexpr float ROLL_SIGN  = 1.0f;
-constexpr float PITCH_SIGN = 1.0f;
+// Orientação do MPU (horizonte) — params AHRS_RLL_SGN / AHRS_PIT_SGN (±1)
+float ROLL_SIGN  = 1.0f;
+float PITCH_SIGN = 1.0f;
+// Rotação do MPU no plano (param AHRS_ROT): 0/1/2/3 = 0°/90°/180°/270° horário.
+// Ajuste por software quando girar o MPU na PCB. Default 1 = comportamento atual.
+float mpu_rot = 1.0f;
+
+// =============================================================================
+// PARÂMETROS — editáveis no Mission Planner (MAVLink), salvos na NVS, ao vivo
+// =============================================================================
+Preferences prefs;
+MavParser   mavrx;
+
+struct Param { const char* name; float* ptr; float vmin, vmax; };
+Param g_params[] = {
+    {"AHRS_RLL_SGN", &ROLL_SIGN,       -1.0f,  1.0f},   // sentido do MPU (roll, horizonte)
+    {"AHRS_PIT_SGN", &PITCH_SIGN,      -1.0f,  1.0f},   // sentido do MPU (pitch, horizonte)
+    {"AHRS_SWAP",    &swap_rp,          0.0f,  1.0f},   // troca roll<->pitch (0/1)
+    {"AHRS_ROT",     &mpu_rot,          0.0f,  3.0f},   // rotação MPU 0/90/180/270°
+    {"STB_RLL_SGN",  &STAB_ROLL_SIGN,  -1.0f,  1.0f},   // sentido da correção (roll)
+    {"STB_PIT_SGN",  &STAB_PITCH_SIGN, -1.0f,  1.0f},   // sentido da correção (pitch)
+    {"SRV_REV_L",    &srv_rev_l,        0.0f,  1.0f},   // reverso elevon esquerdo (0/1)
+    {"SRV_REV_R",    &srv_rev_r,        0.0f,  1.0f},   // reverso elevon direito (0/1)
+    {"STB_KP_RLL",   &KP_ROLL,          0.0f,  0.20f},  // PID auto-nível
+    {"STB_KD_RLL",   &KD_ROLL,          0.0f,  0.10f},
+    {"STB_KP_PIT",   &KP_PITCH,         0.0f,  0.20f},
+    {"STB_KD_PIT",   &KD_PITCH,         0.0f,  0.10f},
+    {"STB_MAXANG",   &MAX_ANGLE_DEG,    5.0f,  80.0f},  // ângulo máx comandado
+    {"MIX_GE",       &G_E,              0.0f,  5.0f},   // mixagem elevon
+    {"MIX_GA",       &G_A,              0.0f,  5.0f},
+    {"MIX_EXPO_E",   &EXPO_E,           0.0f,  0.90f},
+    {"MIX_EXPO_A",   &EXPO_A,           0.0f,  0.90f},
+    {"MIX_DIFF",     &DIFF,            -0.90f, 0.90f},
+};
+const uint16_t NPARAM = sizeof(g_params) / sizeof(g_params[0]);
 
 // =============================================================================
 // HELPERS DE PROCESSAMENTO
@@ -260,6 +316,10 @@ void mixAndWriteElevon() {
     usL = constrain(usL, PWM_MIN, PWM_MAX);
     usR = constrain(usR, PWM_MIN, PWM_MAX);
 
+    // Reverso por servo (params SRV_REV_L/R): espelha em torno de 1500 µs
+    if (srv_rev_l > 0.5f) usL = 3000 - usL;
+    if (srv_rev_r > 0.5f) usR = 3000 - usR;
+
     // CH3 = aileron base (vira elevon L), CH4 = elevator base (vira elevon R)
     servoCh3.writeMicroseconds(usL);
     servoCh4.writeMicroseconds(usR);
@@ -311,7 +371,28 @@ void calibrateGyro() {
 void updateIMU() {
     if (!mpu_ok) return;
     sensors_event_t a, g, t;
-    mpu.getEvent(&a, &g, &t);
+    if (!mpu.getEvent(&a, &g, &t)) {     // leitura I2C falhou: não corrompe a atitude
+        if (++mpu_fail > 50) { mpu.begin(g_mpu_addr); mpu_fail = 0; }  // re-init se travar
+        return;
+    }
+    mpu_fail = 0;
+
+    // --- Calibração de gyro pelo CH9 (acumula amostras CRUAS enquanto segurado) ---
+    if (calib_btn) {
+        calib_sx += g.gyro.x; calib_sy += g.gyro.y; calib_sz += g.gyro.z; calib_n++;
+        calib_was = true;
+        snprintf(g_calib_report, sizeof(g_calib_report), "Calibrando MPU (%lu)", (unsigned long)calib_n);
+    } else if (calib_was) {              // soltou o botão -> finaliza
+        if (calib_n >= 30) {
+            gyro_bias_x = (float)(calib_sx / calib_n);
+            gyro_bias_y = (float)(calib_sy / calib_n);
+            gyro_bias_z = (float)(calib_sz / calib_n);
+            att_roll_deg = 0; att_pitch_deg = 0;   // assume nivelado ao calibrar
+            snprintf(g_calib_report, sizeof(g_calib_report), "MPU calibrado (%lu am)", (unsigned long)calib_n);
+            // buzzer (se PIN_BUZZER >= 0): apita ao terminar
+        }
+        calib_sx = calib_sy = calib_sz = 0; calib_n = 0; calib_was = false;
+    }
 
     uint32_t now_us = micros();
     float dt = (last_imu_us == 0) ? 0.01f : (now_us - last_imu_us) / 1000000.0f;
@@ -323,21 +404,26 @@ void updateIMU() {
     float gx0 = g.gyro.x - gyro_bias_x;
     float gy0 = g.gyro.y - gyro_bias_y;
 
-    // Rotação de 90° HORÁRIO no plano do sensor (em torno do Z/yaw): (x,y) -> (y,-x)
-    // (se ficar girado pro lado errado, troque para: ax=-ay0, ay=ax0, gx=-gy0, gy=gx0)
-    float ax =  ay0, ay = -ax0;
-    float gx =  gy0, gy = -gx0;
+    // Rotação no plano do sensor conforme AHRS_ROT (0/90/180/270° horário).
+    // Ajustável por parâmetro -> conserta giro do MPU na PCB sem reflash.
+    float ax, ay, gx, gy;
+    switch ((int)(mpu_rot + 0.5f)) {
+        case 1:  ax =  ay0; ay = -ax0; gx =  gy0; gy = -gx0; break;  // 90° CW
+        case 2:  ax = -ax0; ay = -ay0; gx = -gx0; gy = -gy0; break;  // 180°
+        case 3:  ax = -ay0; ay =  ax0; gx = -gy0; gy =  gx0; break;  // 270° CW
+        default: ax =  ax0; ay =  ay0; gx =  gx0; gy =  gy0; break;  // 0°
+    }
 
-    // Ângulos absolutos pelo acelerômetro (referência de nível, estável)
     float accel_roll  = atan2f(ay, az) * RAD2DEG;
     float accel_pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD2DEG;
 
-    // Taxas do giroscópio (rad/s)
     rate_roll  = gx;
     rate_pitch = gy;
     rate_yaw   = g.gyro.z - gyro_bias_z;
 
-    // Filtro complementar: gyro (rápido) + accel (sem drift)
+    // Filtro complementar puro: gyro (rápido) + accel (referência de nível).
+    // SEMPRE corrige pelo accel -> é LIMITADO e se auto-corrige (não gira/deriva).
+    // (Robustez contra travamento vem do getEvent()/timeout de I2C, não de gating.)
     const float ALPHA = 0.98f;
     att_roll_deg  = ALPHA * (att_roll_deg  + rate_roll  * RAD2DEG * dt) + (1.0f - ALPHA) * accel_roll;
     att_pitch_deg = ALPHA * (att_pitch_deg + rate_pitch * RAD2DEG * dt) + (1.0f - ALPHA) * accel_pitch;
@@ -431,14 +517,100 @@ void startWifiAP() {
         server.on("/dl", handleDownload);
         server.on("/clear", handleClear);
         server.begin();
+        mavServer.begin();          // MAVLink TCP p/ Mission Planner (porta 5760)
+        mavServer.setNoDelay(true);
     }
 }
 
 void stopWifiAP() {
     server.stop();
+    mavClient.stop();
+    mavServer.end();
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
+    g_mav = (Stream*)&Serial;
     snprintf(g_wifi_report, sizeof(g_wifi_report), "WiFi off");
+}
+
+// =============================================================================
+// PARÂMETROS — protocolo PARAM do MAVLink + persistência na NVS
+// =============================================================================
+void loadParams() {
+    prefs.begin("fcparams", true);
+    for (uint16_t i = 0; i < NPARAM; i++)
+        *g_params[i].ptr = prefs.getFloat(g_params[i].name, *g_params[i].ptr);
+    prefs.end();
+}
+
+void sendParam(uint16_t i) {
+    mav_send_param_value(*g_mav, g_params[i].name, *g_params[i].ptr, NPARAM, i);
+}
+
+int findParam(const char* id) {          // id = 16 bytes (pode não terminar em \0)
+    char name[17]; memcpy(name, id, 16); name[16] = 0;
+    for (uint16_t i = 0; i < NPARAM; i++)
+        if (strncmp(g_params[i].name, name, 16) == 0) return (int)i;
+    return -1;
+}
+
+// PARAM_SET wire: float val[0..3], sys[4], comp[5], id[6..21], type[22]
+void handleParamSet(const uint8_t* p) {
+    float val; memcpy(&val, &p[0], 4);
+    int i = findParam((const char*)&p[6]);
+    if (i < 0) return;
+    if (val < g_params[i].vmin) val = g_params[i].vmin;   // clamp de segurança
+    if (val > g_params[i].vmax) val = g_params[i].vmax;
+    *g_params[i].ptr = val;                                // aplica AO VIVO
+    prefs.begin("fcparams", false);
+    prefs.putFloat(g_params[i].name, val);                 // persiste na NVS
+    prefs.end();
+    sendParam((uint16_t)i);                                // ack p/ o GCS
+}
+
+// PARAM_REQUEST_READ wire: int16 idx[0..1], sys[2], comp[3], id[4..19]
+void handleParamReqRead(const uint8_t* p) {
+    int16_t idx; memcpy(&idx, &p[0], 2);
+    int i = (idx >= 0 && idx < (int)NPARAM) ? idx : findParam((const char*)&p[4]);
+    if (i >= 0) sendParam((uint16_t)i);
+}
+
+// Calibração one-shot do gyro (botão do MP) — re-zera o bias e nivela a atitude.
+// Bloqueia ~0.4 s; só use no chão (cai em failsafe brevemente, sem problema).
+void runGyroCalBlocking() {
+    if (!mpu_ok) return;
+    double sx = 0, sy = 0, sz = 0; const int N = 200;
+    sensors_event_t a, g, t;
+    for (int i = 0; i < N; i++) { if (mpu.getEvent(&a, &g, &t)) { sx += g.gyro.x; sy += g.gyro.y; sz += g.gyro.z; } delay(2); }
+    gyro_bias_x = (float)(sx / N); gyro_bias_y = (float)(sy / N); gyro_bias_z = (float)(sz / N);
+    att_roll_deg = 0; att_pitch_deg = 0;
+    snprintf(g_calib_report, sizeof(g_calib_report), "MPU calibrado (MP)");
+}
+
+void handleMavRx() {
+    switch (mavrx.msgid) {
+        case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
+            if (mavrx.crcOk(MAVLINK_CRC_PARAM_REQUEST_LIST))
+                for (uint16_t i = 0; i < NPARAM; i++) sendParam(i);   // manda a lista toda
+            break;
+        case MAVLINK_MSG_ID_PARAM_REQUEST_READ:
+            if (mavrx.crcOk(MAVLINK_CRC_PARAM_REQUEST_READ)) handleParamReqRead(mavrx.payload);
+            break;
+        case MAVLINK_MSG_ID_PARAM_SET:
+            if (mavrx.crcOk(MAVLINK_CRC_PARAM_SET)) handleParamSet(mavrx.payload);
+            break;
+        case MAVLINK_MSG_ID_COMMAND_LONG:
+            if (mavrx.crcOk(MAVLINK_CRC_COMMAND_LONG)) {
+                uint16_t cmd; memcpy(&cmd, &mavrx.payload[28], 2);   // command @ offset 28 (uint16)
+                if (cmd == MAV_CMD_PREFLIGHT_CALIBRATION) {
+                    runGyroCalBlocking();
+                    mav_send_command_ack(*g_mav, cmd, MAV_RESULT_ACCEPTED);
+                } else {
+                    // ACK genérico p/ o MP parar de re-tentar (REQUEST_MESSAGE, etc.)
+                    mav_send_command_ack(*g_mav, cmd, MAV_RESULT_UNSUPPORTED);
+                }
+            }
+            break;
+    }
 }
 
 // =============================================================================
@@ -460,6 +632,8 @@ void setup() {
     Serial.println();
     Serial.println(F("==== ESP32 FC v2 — entrada CRSF (ELRS 915) ===="));
 #endif
+
+    loadParams();   // carrega params salvos na NVS (sobrescreve os defaults)
 
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, LOW);
@@ -491,18 +665,24 @@ void setup() {
     armESC_safety();
 
     // CRSF UART2 — remapeada para GPIO 32 (RX) / 33 (TX), 420000 8N1
+    // Buffer de RX grande (4 KB ~= 97 ms a 420k): segura os frames CRSF enquanto
+    // o loop é bloqueado por escrita em flash (log), I2C (MPU), etc. — sem isso,
+    // o buffer padrão de 256 B (~6 ms) estoura e o link "soluça"/cai em failsafe.
+    Serial2.setRxBufferSize(4096);
     Serial2.begin(CRSF_BAUDRATE, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
 #if !MAVLINK_ENABLED
     Serial.printf("CRSF iniciado em UART2: RX=GPIO%d TX=GPIO%d @%lu baud\n",
                   PIN_CRSF_RX, PIN_CRSF_TX, (unsigned long)CRSF_BAUDRATE);
 #endif
 
-    // GPS na UART1 (GY-NEO6MV2, 9600 8N1)
+    // GPS na UART1 (GY-NEO6MV2, 9600 8N1) — buffer maior tb p/ não perder NMEA
+    Serial1.setRxBufferSize(512);
     Serial1.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 
     // MPU6050 (não bloqueante: se faltar, segue como RX puro, só sem horizonte)
     Wire.begin(PIN_MPU_SDA, PIN_MPU_SCL);
     Wire.setClock(100000);   // 100 kHz é mais tolerante a pull-ups fracos
+    Wire.setTimeOut(25);     // não trava o loop se o I2C do MPU der glitch (vibração)
 
     // --- Scan I2C: descobre o que realmente está no barramento (21/22) ---
     uint8_t addrs[8]; int found = 0;
@@ -511,9 +691,9 @@ void setup() {
         if (Wire.endTransmission() == 0) { if (found < 8) addrs[found] = a; found++; }
     }
     if (found == 0) {
-        snprintf(g_i2c_report, sizeof(g_i2c_report), "I2C(21/22): nenhum dispositivo");
+        snprintf(g_i2c_report, sizeof(g_i2c_report), "I2C(SDA%d/SCL%d): nenhum", PIN_MPU_SDA, PIN_MPU_SCL);
     } else {
-        snprintf(g_i2c_report, sizeof(g_i2c_report), "I2C(21/22):");
+        snprintf(g_i2c_report, sizeof(g_i2c_report), "I2C(SDA%d):", PIN_MPU_SDA);
         for (int k = 0; k < found && k < 6; k++) {
             char hx[8]; snprintf(hx, sizeof(hx), " 0x%02X", addrs[k]);
             strncat(g_i2c_report, hx, sizeof(g_i2c_report) - strlen(g_i2c_report) - 1);
@@ -569,16 +749,22 @@ void loop() {
         in_.aux2_us  = crsf_channel_to_us(crsf.getChannel(CRSF_IDX_AUX2));
         in_.aux3_us  = crsf_channel_to_us(crsf.getChannel(CRSF_IDX_AUX3));
 
-        // Sticks normalizados para mixagem elevon
-        in_.ele_norm = crsf_to_norm(crsf.getChannel(CRSF_IDX_ELE));
-        in_.ail_norm = crsf_to_norm(crsf.getChannel(CRSF_IDX_AIL));
+        // Sticks normalizados para mixagem elevon (com swap roll<->pitch se ativo)
+        float rollIn  = crsf_to_norm(crsf.getChannel(CRSF_IDX_AIL));
+        float pitchIn = crsf_to_norm(crsf.getChannel(CRSF_IDX_ELE));
+        if (swap_rp > 0.5f) { float tmp = rollIn; rollIn = pitchIn; pitchIn = tmp; }
+        in_.ail_norm = rollIn;
+        in_.ele_norm = pitchIn;
 
         // Switches: CH5 = arm (HIGH=armado), CH8 = modo (LOW=manual, HIGH=estab)
         in_.armed       = crsf_channel_to_us(crsf.getChannel(CRSF_IDX_ARM))  > SWITCH_THRESHOLD_US;
         in_.manual_mode = crsf_channel_to_us(crsf.getChannel(CRSF_IDX_MODE)) < SWITCH_THRESHOLD_US;
+        // CH9 (botão momentâneo): calibra o MPU enquanto segurado
+        calib_btn       = crsf_channel_to_us(crsf.getChannel(CRSF_IDX_CALIB)) > SWITCH_THRESHOLD_US;
 
-        // LED pisca a cada frame recebido (visual rápido de link)
-        digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+        // LED aceso constante enquanto há link CRSF (apaga só em failsafe).
+        // (antes togglava por frame -> flicker confuso que parecia "reset")
+        digitalWrite(PIN_LED, HIGH);
     }
 
     // 3. Failsafe: sem frame por RX_TIMEOUT_MS -> tudo neutro
@@ -623,7 +809,22 @@ void loop() {
         (crsf_channel_to_us(crsf.getChannel(CRSF_IDX_WIFI)) > WIFI_ON_US);
     if (wifi_want && !wifi_on)      { startWifiAP(); wifi_on = true; }
     else if (!wifi_want && wifi_on) { stopWifiAP();  wifi_on = false; }
-    if (wifi_on) server.handleClient();
+    if (wifi_on) {
+        server.handleClient();
+        // aceita 1 cliente MAVLink TCP (Mission Planner em 192.168.4.1:5760)
+        if (mavServer.hasClient()) {
+            if (mavClient && mavClient.connected()) mavServer.available().stop();
+            else                                     mavClient = mavServer.available();
+        }
+        g_mav = (mavClient && mavClient.connected()) ? (Stream*)&mavClient : (Stream*)&Serial;
+    } else {
+        g_mav = (Stream*)&Serial;
+    }
+
+    // MAVLink RX (params do Mission Planner) — alimenta o parser com WiFi e USB.
+    // g_mav já está setado, então as respostas (PARAM_VALUE) vão pra origem certa.
+    while (mavClient && mavClient.available()) { if (mavrx.feed((uint8_t)mavClient.read())) handleMavRx(); }
+    while (Serial.available())                 { if (mavrx.feed((uint8_t)Serial.read()))    handleMavRx(); }
 
 #if MAVLINK_ENABLED
     // ---- HEARTBEAT a 1 Hz (Mission Planner reconhece o vehicle) ----
@@ -637,7 +838,7 @@ void loop() {
         uint8_t state = (millis() - crsf.lastFrameMs() > RX_TIMEOUT_MS)
                         ? MAV_STATE_STANDBY
                         : MAV_STATE_ACTIVE;
-        mav_send_heartbeat(Serial, base, state);
+        mav_send_heartbeat(*g_mav,base, state);
     }
 
     // ---- RC_CHANNELS_RAW a 10 Hz (canais aparecem no painel "Radio") ----
@@ -656,14 +857,14 @@ void loop() {
             (uint16_t)crsf_channel_to_us(crsf.getChannel(6)),  // CH7
             (uint16_t)crsf_channel_to_us(crsf.getChannel(7))   // CH8 Modo
         };
-        mav_send_rc_channels_raw(Serial, now, ch);
+        mav_send_rc_channels_raw(*g_mav,now, ch);
     }
 
     // ---- ATTITUDE a 25 Hz (horizonte artificial no MP) ----
     static uint32_t last_att_ms = 0;
     if (now - last_att_ms >= 40) {
         last_att_ms = now;
-        mav_send_attitude(Serial, now,
+        mav_send_attitude(*g_mav,now,
                           ROLL_SIGN  * att_roll_deg  * DEG2RAD,
                           PITCH_SIGN * att_pitch_deg * DEG2RAD,
                           0.0f,
@@ -682,10 +883,10 @@ void loop() {
         int32_t  alt  = gps.altitude.isValid() ? (int32_t)(gps.altitude.meters() * 1000.0) : 0;
         uint16_t vel  = gps.speed.isValid()    ? (uint16_t)(gps.speed.mps() * 100.0)   : 0;
         uint16_t cog  = gps.course.isValid()   ? (uint16_t)(gps.course.deg() * 100.0)  : 0;
-        mav_send_gps_raw_int(Serial, (uint64_t)now * 1000ULL, fix, lat, lon, alt, vel, cog, sats);
+        mav_send_gps_raw_int(*g_mav,(uint64_t)now * 1000ULL, fix, lat, lon, alt, vel, cog, sats);
         if (fixv) {  // só põe ícone no mapa quando tem fix (evita 0,0)
             uint16_t hdg = gps.course.isValid() ? (uint16_t)(gps.course.deg() * 100.0) : 65535;
-            mav_send_global_position_int(Serial, now, lat, lon, alt, alt, 0, 0, 0, hdg);
+            mav_send_global_position_int(*g_mav,now, lat, lon, alt, alt, 0, 0, 0, hdg);
         }
     }
 
@@ -696,7 +897,7 @@ void loop() {
         last_status_ms = now;
         char buf[50];
         const char *msg; uint8_t sev = MAV_SEVERITY_INFO;
-        switch (status_idx++ % 5) {
+        switch (status_idx++ % 6) {
             case 0: msg = g_i2c_report; sev = mpu_ok ? MAV_SEVERITY_INFO : MAV_SEVERITY_CRITICAL; break;
             case 1: msg = g_pwm_report; sev = strstr(g_pwm_report, "FALH") ? MAV_SEVERITY_CRITICAL : MAV_SEVERITY_INFO; break;
             case 2:
@@ -714,11 +915,13 @@ void loop() {
                          in_.armed ? "ARMADO" : "DESARMADO",
                          (int)att_roll_deg, (int)att_pitch_deg);
                 msg = buf; break;
-            default:
+            case 4:
                 snprintf(buf, sizeof(buf), "%s | %s", g_log_report, g_wifi_report);
                 msg = buf; break;
+            default:
+                msg = g_calib_report; break;
         }
-        mav_send_statustext(Serial, sev, msg);
+        mav_send_statustext(*g_mav,sev, msg);
     }
 #else
     // ---- Debug texto (4 Hz) — linha semântica (mapa AETR confirmado) ----

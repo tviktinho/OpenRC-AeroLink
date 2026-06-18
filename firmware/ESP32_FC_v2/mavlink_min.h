@@ -316,4 +316,79 @@ static inline void mav_send_global_position_int(Stream &s, uint32_t time_boot_ms
                    MAVLINK_PAYLOAD_LEN_GLOBAL_POSITION_INT, MAVLINK_CRC_GLOBAL_POSITION_INT);
 }
 
+// =============================================================================
+// PARAM protocol — config em tempo real pelo Mission Planner
+//   IDs e CRC_EXTRA das mensagens recebidas do GCS + envio de PARAM_VALUE
+// =============================================================================
+#define MAVLINK_MSG_ID_PARAM_REQUEST_READ  20
+#define MAVLINK_CRC_PARAM_REQUEST_READ     214
+#define MAVLINK_MSG_ID_PARAM_REQUEST_LIST  21
+#define MAVLINK_CRC_PARAM_REQUEST_LIST     159
+#define MAVLINK_MSG_ID_PARAM_VALUE         22
+#define MAVLINK_CRC_PARAM_VALUE            220
+#define MAVLINK_MSG_ID_PARAM_SET           23
+#define MAVLINK_CRC_PARAM_SET              168
+#define MAV_PARAM_TYPE_REAL32              9
+
+// PARAM_VALUE (id 22) — 25 bytes. Ordem de wire: float, u16, u16, char[16], u8.
+static inline void mav_send_param_value(Stream &s, const char *id, float value,
+                                        uint16_t count, uint16_t index) {
+    uint8_t p[25] = {0};
+    mav_put_float(&p[0], value);
+    mav_put_u16(&p[4], count);
+    mav_put_u16(&p[6], index);
+    for (uint8_t i = 0; i < 16 && id[i]; i++) p[8 + i] = (uint8_t)id[i];
+    p[24] = MAV_PARAM_TYPE_REAL32;
+    mav_send_frame(s, MAVLINK_MSG_ID_PARAM_VALUE, p, 25, MAVLINK_CRC_PARAM_VALUE);
+}
+
+// Parser MAVLink v1 (RX) — monta frames recebidos do GCS (PARAM_REQUEST_*/SET).
+class MavParser {
+public:
+    uint8_t msgid = 0, plen = 0, payload[255];
+    // Retorna true quando um frame completo termina (msgid/payload/plen válidos).
+    bool feed(uint8_t b) {
+        switch (st_) {
+            case 0: if (b == MAVLINK_STX_V1) st_ = 1; return false;     // STX
+            case 1: plen_ = b; idx_ = 0; mav_crc_init(&crc_);
+                    mav_crc_accumulate(b, &crc_); st_ = 2; return false; // LEN
+            case 2: case 3: case 4:                                     // SEQ/SYS/COMP
+                    mav_crc_accumulate(b, &crc_); st_++; return false;
+            case 5: msgid = b; mav_crc_accumulate(b, &crc_);
+                    st_ = (plen_ > 0) ? 6 : 7; return false;            // MSGID
+            case 6: payload[idx_++] = b; mav_crc_accumulate(b, &crc_);
+                    if (idx_ >= plen_) st_ = 7; return false;           // PAYLOAD
+            case 7: crc_rx_ = b; st_ = 8; return false;                 // CRC low
+            case 8: crc_rx_ |= ((uint16_t)b << 8); st_ = 0;
+                    plen = plen_; return true;                          // CRC high -> pronto
+        }
+        st_ = 0; return false;
+    }
+    bool crcOk(uint8_t crc_extra) const {
+        uint16_t c = crc_; mav_crc_accumulate(crc_extra, &c); return c == crc_rx_;
+    }
+private:
+    uint8_t  st_ = 0, plen_ = 0, idx_ = 0;
+    uint16_t crc_ = 0, crc_rx_ = 0;
+};
+
+// =============================================================================
+// COMMAND_LONG (RX) / COMMAND_ACK (TX) — botões de calibração do Mission Planner
+// =============================================================================
+#define MAVLINK_MSG_ID_COMMAND_LONG        76
+#define MAVLINK_CRC_COMMAND_LONG           152
+#define MAVLINK_MSG_ID_COMMAND_ACK         77
+#define MAVLINK_CRC_COMMAND_ACK            143
+#define MAV_CMD_PREFLIGHT_CALIBRATION      241
+#define MAV_RESULT_ACCEPTED                0
+#define MAV_RESULT_UNSUPPORTED             3
+
+// COMMAND_ACK (id 77) — 3 bytes: uint16 command, uint8 result
+static inline void mav_send_command_ack(Stream &s, uint16_t cmd, uint8_t result) {
+    uint8_t p[3];
+    mav_put_u16(&p[0], cmd);
+    p[2] = result;
+    mav_send_frame(s, MAVLINK_MSG_ID_COMMAND_ACK, p, 3, MAVLINK_CRC_COMMAND_ACK);
+}
+
 #endif // MAVLINK_MIN_H
